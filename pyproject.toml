@@ -1,0 +1,19 @@
+[project]
+name = "document-ocr-api"
+version = "2.1.0"
+description = "Document OCR API for leasing: extracts and verifies identity and company documents from any country with Gemini vision."
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [".venv", "logs", "postman_output", "learned_countries", "detections"]
+
+[tool.ruff.lint]
+# Pyflakes (undefined names, unused imports) and import order. Long lines are allowed: the Gemini
+# prompts are deliberately written as single long strings.
+select = ["F", "I"]

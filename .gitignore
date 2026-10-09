@@ -1,0 +1,36 @@
+# Secrets
+.env
+
+# Python
+.venv/
+ocr-dev-venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Runtime output - logs, crops, per-request folders
+logs/
+detections/
+postman_output/
+# New country names learned at runtime (see COUNTRY_LEARNING_DIR)
+learned_countries/
+
+# Uploaded or sample identity documents never belong in the repo
+/*.pdf
+/*.jpg
+/*.jpeg
+/*.png
+/*.webp
+samples/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Personal AI-assistant instruction files - kept locally, never committed
+GEMINI.md
+CLAUDE.md
