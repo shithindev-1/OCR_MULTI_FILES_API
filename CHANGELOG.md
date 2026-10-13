@@ -28,10 +28,23 @@ The existing endpoints keep their behaviour and response shapes.
     `{tenant_id, fields}`; each document has `tenant_ids`, `document_type`, `status`
     (`valid` / `invalid` / `ignored` / `not_checked`), `merged`, `sources` and `error`.
   - Processed (cropped/rotated/merged) copies are uploaded beside the original, named after their
-    type: `National_ID.pdf`, `Passport.jpg`, `National_ID_2.pdf` - or, with several tenants,
-    `Tenant_1_National_ID.pdf`, `Tenant_2_Passport.jpg`. An original is never overwritten.
+    type, always as a PDF: `National_ID.pdf`, `Passport.pdf`, `National_ID_2.pdf` - or, with several
+    tenants, `Tenant_1_National_ID.pdf`, `Tenant_2_Passport.pdf`. An original is never overwritten.
+    Each is also kept on the server under `LEASING_OUTPUT_DIR/<document_refnumber>/`; an attached file
+    with no blob link gets that local path as its `ocr_file`.
 - **Logs:** segmentation, front/back matching, tenant grouping and per-tenant results in
   `ocr-api.log`; the per-request usage line has a `segmentation` figure.
+
+### Fixed
+- **Several documents in one photo** (e.g. passport, ID front and back, and residence card) came out
+  as one combined file. The split call now asks for boxes in Gemini's own `[ymin, xmin, ymax, xmax]`
+  0-1000 format, which it answers in consistently; corner answers on a 0-1000 scale are also read
+  correctly. Each document now gets its own PDF.
+- **Blurry processed files.** Cut-outs are now lossless (PNG, or a near-lossless PDF read back at
+  its own pixel size instead of shrunk to two thirds), crops use cubic warps and Lanczos upscaling,
+  the contrast boost is off by default (`DETECTION_CROP_CONTRAST_CLIP=0`), sharpening is lighter
+  (`DETECTION_CROP_SHARPEN_AMOUNT=0.4`), and PDF pages are stored at JPEG quality 95 with full colour
+  detail. Small print in the processed files is now as sharp as in the upload.
 
 ### Changed
 - **`usage.log`** has a new `segmentation` key on every request (`0` on the existing endpoints).

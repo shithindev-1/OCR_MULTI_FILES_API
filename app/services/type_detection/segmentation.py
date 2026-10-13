@@ -26,6 +26,7 @@ from app.core.config import Settings
 from app.schemas.ocr import VERIFIABLE_TYPES
 from app.services import result_cache
 from app.services.detection import (
+    PDF_PAGE_QUALITY,
     PageDetection,
     crop_page,
     downscale_for_detection,
@@ -86,21 +87,57 @@ def _parse_label(label: str) -> tuple[str, int, str] | None:
         return None
 
 
-def _encode_jpeg(image_bgr: np.ndarray) -> bytes:
-    ok, buffer = cv2.imencode(".jpg", image_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    if not ok:
-        raise ValueError("Failed to encode document crop as JPEG")
-    return buffer.tobytes()
+def _crops_to_file(crops: list[np.ndarray], pdf_dpi: int) -> tuple[bytes, str]:
+    """One crop -> a lossless PNG; several -> one PDF with a page per crop.
 
-
-def _crops_to_file(crops: list[np.ndarray]) -> tuple[bytes, str]:
-    """One crop -> a JPG; several -> one PDF with a page per crop (Pillow stores them as JPEG)."""
+    Every cut-out is read again and then cropped once more, so it must lose nothing: a JPEG cut-out
+    or a PDF rendered back at a lower DPI than it was written at softened small print into smudge
+    before the final crop even started. The PDF is written at `pdf_dpi` - the DPI the crop step
+    renders PDFs at - so its pages come back at exactly their own pixel size.
+    """
     if len(crops) == 1:
-        return _encode_jpeg(crops[0]), ".jpg"
+        ok, buffer = cv2.imencode(".png", crops[0])
+        if not ok:
+            raise ValueError("Failed to encode document crop as PNG")
+        return buffer.tobytes(), ".png"
     pages = [Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)) for crop in crops]
     buffer = BytesIO()
-    pages[0].save(buffer, format="PDF", save_all=True, append_images=pages[1:], resolution=_SEGMENT_PDF_DPI)
+    pages[0].save(
+        buffer, format="PDF", save_all=True, append_images=pages[1:], resolution=pdf_dpi, **PDF_PAGE_QUALITY,
+    )
     return buffer.getvalue(), ".pdf"
+
+
+def _fractions(corners: Any) -> Any:
+    """The corners as fractions of the image (0 to 1).
+
+    The prompt asks for fractions, but the model sometimes answers on Gemini's own 0-1000 box scale
+    instead. Read as fractions, every such box falls outside the image, becomes the whole page, and
+    the boxes then collapse into one - a passport, an ID and a visa in one photo came back as a
+    single document. A box with any value above 1 is therefore read as 0-1000 and scaled down.
+    """
+    if not isinstance(corners, list):
+        return corners
+    try:
+        values = [float(value) for corner in corners for value in (corner["x"], corner["y"])]
+    except (KeyError, TypeError, ValueError):
+        return corners
+    if not values or max(values) <= 1.0 or max(values) > 1000.0:
+        return corners
+    return [{"x": float(corner["x"]) / 1000.0, "y": float(corner["y"]) / 1000.0} for corner in corners]
+
+
+def _region_corners(region: dict[str, Any]) -> Any:
+    """The region's four corners as image fractions, from `box_2d` ([ymin, xmin, ymax, xmax] on
+    0-1000) - or, from an answer that gave `corners`, those (see `_fractions`)."""
+    box = region.get("box_2d")
+    if isinstance(box, list) and len(box) == 4:
+        try:
+            ymin, xmin, ymax, xmax = (min(max(float(value), 0.0), 1000.0) / 1000.0 for value in box)
+        except (TypeError, ValueError):
+            return None
+        return [{"x": xmin, "y": ymin}, {"x": xmax, "y": ymin}, {"x": xmax, "y": ymax}, {"x": xmin, "y": ymax}]
+    return _fractions(region.get("corners"))
 
 
 def build_segments(
@@ -117,7 +154,7 @@ def build_segments(
             page_result={
                 "found": bool(regions),
                 "documents": [
-                    {"label": _region_label(region, page_number, position), "corners": region.get("corners")}
+                    {"label": _region_label(region, page_number, position), "corners": _region_corners(region)}
                     for position, region in enumerate(regions)
                 ],
             },
@@ -153,7 +190,7 @@ def build_segments(
                 )
                 for detection, image, _, _ in members
             ]
-            segment.content, segment.extension = _crops_to_file(crops)
+            segment.content, segment.extension = _crops_to_file(crops, settings.detection_pdf_dpi)
     return segments
 
 
@@ -171,6 +208,15 @@ async def segment_file(
         )
         page_results = await gemini_service.segment_documents(encoded)
         result_cache.put(cache_key, page_results)
+        logger.info(
+            "Segmentation answer sha256=%s regions=%s", sha256,
+            [
+                (page_number, region.get("document_type"), region.get("side"), region.get("document_number"),
+                 region.get("box_2d") or region.get("corners"))
+                for page_number, page in enumerate(page_results, start=1)
+                for region in (page or {}).get("regions") or [] if isinstance(region, dict)
+            ],
+        )
     segments = await asyncio.to_thread(build_segments, images, page_results, settings)
     logger.info(
         "Segmentation sha256=%s pages=%d documents=%s",

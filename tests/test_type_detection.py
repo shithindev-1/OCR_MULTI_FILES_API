@@ -131,7 +131,7 @@ def test_file_with_two_documents_is_split_and_each_checked(client: TestClient, m
     body = _upload(client, ["scan.png"]).json()
 
     assert body["status"] == "success"
-    assert sorted(extracted) == ["scan_1_national_id.jpg", "scan_2_passport.jpg"]
+    assert sorted(extracted) == ["scan_1_national_id.png", "scan_2_passport.png"]
     [tenant] = body["form_data"]
     assert (tenant["national_id"], tenant["passport_number"]) == ("784-1985-1234567-1", "N1234567")
     assert [(d["document_type"], d["status"]) for d in body["documents"]] == [
@@ -307,7 +307,7 @@ def test_front_and_back_of_one_card_become_one_document_and_others_are_cut_out()
     card, passport = segments
     assert (card.document_type, card.pages, card.extension) == ("national_id", [1, 2], ".pdf")
     assert card.content.startswith(b"%PDF-")
-    assert (passport.document_type, passport.pages, passport.extension) == ("passport", [1], ".jpg")
+    assert (passport.document_type, passport.pages, passport.extension) == ("passport", [1], ".png")
 
 
 def test_each_cut_out_document_gets_its_own_blob_result_path() -> None:
@@ -691,3 +691,140 @@ def test_sides_that_cannot_be_matched_still_get_the_pairing_error(
 
     assert body["status"] == "failed"
     assert all("couldn't tell which front goes with which back" in d["error"] for d in body["documents"])
+
+
+# --- processed files: cropped/rotated at the end, one PDF per document, named after its type -------
+
+CONTAINER = "https://acct.blob.core.windows.net/files-uat"
+FOLDER = "ApplicationFiles/LeasingRequestOCR/1/app-1"
+
+
+class _FakeBlob(blob_storage.BlobStorage):
+    def __init__(self, blobs: dict[str, bytes]) -> None:
+        self.container_url = CONTAINER
+        self.blobs = blobs
+        self.uploads: dict[str, tuple[bytes, str]] = {}
+
+    async def download(self, path: str, *, max_bytes: int) -> tuple[bytes, str | None]:
+        return self.blobs[path], "application/octet-stream"
+
+    async def upload(self, path: str, content: bytes, content_type: str) -> None:
+        self.uploads[path] = (content, content_type)
+
+
+@pytest.fixture
+def cropping(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Crop/rotate on, stubbed: one upright crop per region the cut-out holds."""
+    from app.services.leasing import batch
+
+    monkeypatch.setattr(settings, "detection_enabled", True)
+
+    async def fake_detection(**kwargs: Any) -> list[Path]:
+        folder = Path(kwargs["settings"].detection_output_dir)
+        folder.mkdir(parents=True, exist_ok=True)
+        pages = 2 if kwargs["mime_type"] == "application/pdf" else 1
+        paths = []
+        for page in range(1, pages + 1):
+            path = folder / f"crop_{kwargs['sha256'][:8]}_{page}.png"
+            Image.new("RGB", (80, 50), "gray").save(path, format="PNG")
+            paths.append(path)
+        return paths
+
+    monkeypatch.setattr(batch, "run_detection", fake_detection)
+
+
+def test_each_document_of_one_file_is_uploaded_as_its_own_pdf(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, cropping: None, tmp_path: Path,
+) -> None:
+    storage = _FakeBlob({f"{FOLDER}/scan.png": _png("scan.png")})
+    monkeypatch.setattr(blob_storage, "get_blob_storage", lambda: storage)
+    _stub(
+        monkeypatch,
+        segments={"scan.png": [_region("national_id", 1, TOP_HALF), _region("passport", 2, BOTTOM_HALF)]},
+        answers={
+            "scan_1_national_id": _raw(["national_id"], National_Id="784-1971-6060254-2", **AHMED),
+            "scan_2_passport": _raw(["passport"], Passport_Number="A28334482", **AHMED),
+        },
+    )
+
+    body = client.post("/api/v1/ocr/leasing/detect", json={
+        "tenant_type": "individual", "document_refnumber": "app-1", "sources": [{"source": f"{FOLDER}/scan.png"}],
+    }).json()
+
+    assert body["status"] == "success"
+    # One file in, two separate processed files out - each a PDF named after its type.
+    assert sorted(storage.uploads) == [f"{FOLDER}/National_ID.pdf", f"{FOLDER}/Passport.pdf"]
+    assert all(content.startswith(b"%PDF-") and kind == "application/pdf" for content, kind in storage.uploads.values())
+    assert [d["sources"][0]["ocr_file"] for d in body["documents"]] == [
+        f"{CONTAINER}/{FOLDER}/National_ID.pdf", f"{CONTAINER}/{FOLDER}/Passport.pdf",
+    ]
+    # A copy of each is also kept on the server, in the request's own folder.
+    assert sorted(path.name for path in (tmp_path / "app-1").glob("*.pdf")) == ["National_ID.pdf", "Passport.pdf"]
+
+
+def test_an_uploaded_file_gets_a_local_pdf_as_its_ocr_file(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, cropping: None,
+) -> None:
+    _stub(monkeypatch, segments={"eid.png": [_region("national_id", 1)]}, answers={"eid.png": _raw(["national_id"])})
+
+    body = _upload(client, ["eid.png"]).json()
+
+    ocr_file = Path(body["documents"][0]["sources"][0]["ocr_file"])
+    assert ocr_file.name == "National_ID.pdf"
+    assert ocr_file.read_bytes().startswith(b"%PDF-")
+
+
+def test_several_tenants_get_tenant_named_pdfs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, cropping: None,
+) -> None:
+    _stub(
+        monkeypatch,
+        segments={"a.png": [_region("national_id", 1)], "s.png": [_region("national_id", 1)]},
+        answers={
+            "a.png": _raw(["national_id"], National_Id="784-1990-1111111-1", **AHMED),
+            "s.png": _raw(["national_id"], National_Id="784-1985-2222222-2", **SARA),
+        },
+    )
+
+    body = _upload(client, ["a.png", "s.png"]).json()
+
+    assert [Path(d["sources"][0]["ocr_file"]).name for d in body["documents"]] == [
+        "Tenant_1_National_ID.pdf", "Tenant_2_National_ID.pdf",
+    ]
+
+
+# --- the split call's box formats ----------------------------------------------------------------
+
+
+def _region_box(document_type: str, number: int, box_2d: list[int], side: str = "single") -> dict[str, Any]:
+    return {"document_type": document_type, "side": side, "document_number": number, "box_2d": box_2d}
+
+
+def test_boxes_in_gemini_format_split_a_photo_of_several_cards() -> None:
+    # The layout of a real test photo: passport left, ID front and back right, residence card below.
+    import numpy as np
+
+    from app.services.type_detection.segmentation import build_segments
+
+    page = np.full((1280, 1055, 3), 255, dtype=np.uint8)
+    segments = build_segments([page], [{"regions": [
+        _region_box("passport", 1, [0, 11, 642, 576]),
+        _region_box("national_id", 2, [24, 638, 214, 997], "front"),
+        _region_box("national_id", 2, [257, 638, 444, 999], "back"),
+        _region_box("visa", 3, [655, 0, 995, 590]),
+    ]}], settings)
+
+    assert [(s.document_type, len(s.regions), s.extension) for s in segments] == [
+        ("passport", 1, ".png"), ("national_id", 2, ".pdf"), ("visa", 1, ".png"),
+    ]
+    # Each cut is its own region, not the whole photo.
+    assert all(region.method != "fallback_invalid_response" for s in segments for region in s.regions)
+
+
+def test_corners_on_a_0_to_1000_scale_are_read_as_such() -> None:
+    from app.services.type_detection.segmentation import _fractions
+
+    corners = [{"x": 639, "y": 27}, {"x": 997, "y": 27}, {"x": 997, "y": 213}, {"x": 639, "y": 213}]
+    assert _fractions(corners)[0] == {"x": 0.639, "y": 0.027}
+    fractions = [{"x": 0.1, "y": 0.2}] * 4
+    assert _fractions(fractions) == fractions

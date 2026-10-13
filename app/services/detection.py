@@ -27,6 +27,9 @@ _MIN_VALID_AREA_RATIO = 0.05
 _DUPLICATE_OVERLAP_RATIO = 0.8
 _DETECTION_MAX_DIMENSION = 1024
 _MAX_UPSCALE = 3.0
+# Pages of a PDF built from crops are stored as JPEG; Pillow's default (quality 75, halved colour
+# resolution) visibly blurs small print, so they are saved near-lossless with full colour detail.
+PDF_PAGE_QUALITY = {"quality": 95, "subsampling": 0}
 _VALID_ROTATIONS = (0, 90, 180, 270)
 # Where the document's top currently sits -> the clockwise turn that brings it back to the top.
 # A top lying along the left edge needs a quarter turn clockwise; one along the right edge needs
@@ -506,8 +509,9 @@ def crop_page(
     # A perspective (not affine) transform, so this straightens skew/rotation and crops to the
     # document bounds in the same step.
     matrix = cv2.getPerspectiveTransform(ordered, destination)
+    # Cubic, not the default linear, so the warp keeps small print sharp.
     return cv2.warpPerspective(
-        image_bgr, matrix, (target_width + 2 * margin, target_height + top_margin + margin)
+        image_bgr, matrix, (target_width + 2 * margin, target_height + top_margin + margin), flags=cv2.INTER_CUBIC,
     )
 
 
@@ -561,7 +565,8 @@ def _resize_to_target(image_bgr: np.ndarray, target_long_edge: int) -> np.ndarra
     scale = min(scale, _MAX_UPSCALE)
     if abs(scale - 1.0) < 0.01:
         return image_bgr
-    interpolation = cv2.INTER_CUBIC if scale > 1.0 else cv2.INTER_AREA
+    # Lanczos keeps letter edges crisper than cubic when a small crop is enlarged.
+    interpolation = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
     return cv2.resize(image_bgr, (max(round(width * scale), 1), max(round(height * scale), 1)), interpolation=interpolation)
 
 
@@ -581,7 +586,7 @@ def _sharpen(image_bgr: np.ndarray, amount: float) -> np.ndarray:
         return image_bgr
     # Unsharp mask: subtract a blurred copy to re-emphasise edges. Applied last, at final
     # resolution, so the sharpening isn't smeared away by a later resize.
-    blurred = cv2.GaussianBlur(image_bgr, (0, 0), sigmaX=1.0)
+    blurred = cv2.GaussianBlur(image_bgr, (0, 0), sigmaX=1.2)
     return cv2.addWeighted(image_bgr, 1.0 + amount, blurred, -amount, 0)
 
 
@@ -765,7 +770,7 @@ def save_merged_document(
     stem = f"{_safe_stem(filename)}_{sha256[:8]}"
     pages = [Image.open(path).convert("RGB") for path in image_paths]
     merged_path = output_dir / f"{stem}_merged.pdf"
-    pages[0].save(merged_path, format="PDF", save_all=True, append_images=pages[1:])
+    pages[0].save(merged_path, format="PDF", save_all=True, append_images=pages[1:], **PDF_PAGE_QUALITY)
     return merged_path
 
 

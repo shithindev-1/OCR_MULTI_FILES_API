@@ -14,6 +14,7 @@ from PIL import Image
 from app.core.config import settings
 from app.services import blob_storage
 from app.services.blob_storage import BlobStorageError
+from app.services.detection import PDF_PAGE_QUALITY
 from app.services.leasing.sources import safe_name
 from app.services.post_processing import document_label
 from app.services.validation import ALLOWED_FILES
@@ -38,22 +39,25 @@ def merged_folder(refnumber: str, front_id: str, back_id: str) -> Path:
     return folder
 
 
-def _ocr_output(image_paths: list[Path], original_extension: str) -> tuple[bytes, str, str]:
+def _ocr_output(
+    image_paths: list[Path], original_extension: str, *, as_pdf: bool = False,
+) -> tuple[bytes, str, str]:
     """Builds the uploaded result from a document's final cropped/rotated PNGs.
 
     Returns (content, extension, content_type). One crop keeps the original's own image format
     (a .jpg stays a .jpg); several crops - a PDF's pages, or two cards found in one photo - become
-    one PDF, a page per crop, since a single image file cannot hold more than one.
+    one PDF, a page per crop, since a single image file cannot hold more than one. `as_pdf` makes
+    even a single crop a PDF.
     """
     images = [Image.open(path) for path in image_paths]
     buffer = BytesIO()
     image_format = _IMAGE_FORMATS.get(original_extension)
-    if len(images) == 1 and image_format:
+    if len(images) == 1 and image_format and not as_pdf:
         image = images[0].convert("RGB") if image_format == "JPEG" else images[0]
         image.save(buffer, format=image_format, **({"quality": 95} if image_format == "JPEG" else {}))
         return buffer.getvalue(), original_extension, ALLOWED_FILES[original_extension]
     pages = [image.convert("RGB") for image in images]
-    pages[0].save(buffer, format="PDF", save_all=True, append_images=pages[1:])
+    pages[0].save(buffer, format="PDF", save_all=True, append_images=pages[1:], **PDF_PAGE_QUALITY)
     return buffer.getvalue(), ".pdf", "application/pdf"
 
 
@@ -71,19 +75,38 @@ def type_file_stem(document_type: str) -> str:
     return "_".join(word if word.isupper() else word.capitalize() for word in words)
 
 
+async def build_result(
+    crop_paths: list[Path], merged_pdf: Path | None, original_extension: str, *, as_pdf: bool = False,
+) -> tuple[bytes, str, str]:
+    """One document's processed result as (content, extension, content_type): the merged PDF of a
+    front/back pair, or its crops - see `_ocr_output`."""
+    if merged_pdf is not None:
+        return merged_pdf.read_bytes(), ".pdf", "application/pdf"
+    return await asyncio.to_thread(_ocr_output, crop_paths, original_extension, as_pdf=as_pdf)
+
+
+async def save_named_result(
+    folder: Path, name: str, crop_paths: list[Path], merged_pdf: Path | None,
+) -> Path:
+    """Writes a type-named document's processed result to `folder` as `<name>.pdf`."""
+    content, _, _ = await build_result(crop_paths, merged_pdf, ".pdf", as_pdf=True)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{name}.pdf"
+    await asyncio.to_thread(path.write_bytes, content)
+    return path
+
+
 async def upload_ocr_result(
     blob_path: str, crop_paths: list[Path], merged_pdf: Path | None, name: str | None = None,
 ) -> str:
     """Uploads one document's result beside its original and returns its full blob URL. It is
-    named `<original>_ocr.<ext>`, or `<name>.<ext>` when a name is given."""
+    named `<original>_ocr.<ext>`; or, when a name is given (a type-detected document), `<name>.pdf` -
+    always a PDF."""
     storage = blob_storage.get_blob_storage()
     if storage is None:
         raise BlobStorageError("blob storage is not configured")
-    if merged_pdf is not None:
-        content, extension, content_type = merged_pdf.read_bytes(), ".pdf", "application/pdf"
-    else:
-        extension = posixpath.splitext(blob_path)[1].lower()
-        content, extension, content_type = await asyncio.to_thread(_ocr_output, crop_paths, extension)
+    extension = posixpath.splitext(blob_path)[1].lower()
+    content, extension, content_type = await build_result(crop_paths, merged_pdf, extension, as_pdf=bool(name))
     if name:
         folder = posixpath.dirname(blob_path)
         target = posixpath.join(folder, f"{name}{extension}") if folder else f"{name}{extension}"
@@ -145,11 +168,10 @@ def assign_type_file_names(
             folder, name = posixpath.split(path)
             originals.setdefault(folder, set()).add(posixpath.splitext(name)[0].lower())
     used: dict[tuple[str, str], int] = {}
+    used_locally: dict[str, int] = {}
     for key in sorted(documents):
         path = items[key[0]].get("blob_path")
-        if not path:
-            continue
-        folder = posixpath.dirname(path)
+        folder = posixpath.dirname(path) if path else ""
         stem = type_file_stem(documents[key]["document_type"])
         if tenant_numbers and tenant_numbers.get(key):
             stem = "Tenant_" + "_".join(str(number) for number in tenant_numbers[key]) + f"_{stem}"
@@ -158,3 +180,6 @@ def assign_type_file_names(
         if name.lower() in originals.get(folder, set()):
             name = f"{name}_ocr"
         documents[key]["_ocr_name"] = name
+        # The local copy sits in one folder per request, whichever blob folder the original came from.
+        local_count = used_locally[stem] = used_locally.get(stem, 0) + 1
+        documents[key]["_local_name"] = stem if local_count == 1 else f"{stem}_{local_count}"

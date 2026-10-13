@@ -185,7 +185,7 @@ The file may hold one document or several different documents together - for exa
 - document_type: exactly one of national_id (a government national identity card from any country, including a UAE Emirates ID), passport (a passport's data page or open booklet), visa (a visa or residence permit, including a visa page or sticker, an e-visa, or a residence card), bank_statement, ejari_certificate, trade_license (a commercial trade or business licence), tenant_form, initial_approval, salary_certificate (including a salary statement, salary letter or payslip), tenancy_contract, cheque, or other for anything that is none of these. Judge only from what the document itself shows: an ID number, passport number or name printed on one document never makes it a different type - a visa that prints an Emirates ID number is still a visa.
 - side: front or back for the two faces of a National ID card; single for every other region.
 - document_number: 1, 2, 3 ... identifying which physical document the region belongs to. Regions that are parts of the SAME physical document share one number - the front and back of the same card, or consecutive pages of the same contract, statement or licence. Two different physical documents never share a number, even when they are the same type: two different people's ID cards are two documents.
-- corners: the four corners of the region as fractions (0 to 1) of the image's width and height, where x grows to the right and y grows downwards, in any order. The box must contain the region completely - when unsure, place a corner slightly outside the edge rather than inside it. A document that fills the whole page gets the corners (0,0), (1,0), (1,1), (0,1). Never let one region's box cover another region.
+- box_2d: the region's bounding box as [ymin, xmin, ymax, xmax], each a whole number from 0 to 1000 on the image's own height and width (0 = top or left edge, 1000 = bottom or right edge). The box must contain the region completely - when unsure, make it slightly larger rather than smaller. A document that fills the whole page gets [0, 0, 1000, 1000]. Never let one region's box cover another region.
 
 Return exactly one entry in the pages array per image shown, in the same order, each listing that page's regions top-to-bottom then left-to-right. A blank page has an empty regions list. Return JSON only."""
 
@@ -206,17 +206,12 @@ SEGMENTATION_SCHEMA = {
                                 "document_type": {"type": "string", "enum": SEGMENTATION_DOCUMENT_TYPES},
                                 "side": {"type": "string", "enum": ["front", "back", "single"]},
                                 "document_number": {"type": "integer"},
-                                # Exactly four is enforced in code, as for BOX_DETECTION_SCHEMA.
-                                "corners": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {"x": {"type": "number"}, "y": {"type": "number"}},
-                                        "required": ["x", "y"],
-                                    },
-                                },
+                                # Gemini's own box format, [ymin, xmin, ymax, xmax] on 0-1000 - the one
+                                # it answers in reliably. Asked for corner fractions instead, it switched
+                                # between fractions, 0-1000 and pixels from one call to the next.
+                                "box_2d": {"type": "array", "items": {"type": "integer"}},
                             },
-                            "required": ["document_type", "side", "document_number", "corners"],
+                            "required": ["document_type", "side", "document_number", "box_2d"],
                         },
                     },
                 },

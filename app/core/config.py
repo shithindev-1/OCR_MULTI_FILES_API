@@ -63,8 +63,10 @@ class Settings(BaseSettings):
     detection_crop_top_padding_ratio: float = 0.015
     detection_rotation_min_confidence: float = 0.7
     detection_crop_target_long_edge: int = 1600
-    detection_crop_sharpen_amount: float = 0.6
-    detection_crop_contrast_clip: float = 1.5
+    # Light sharpening only, and no contrast boost by default: on printed cards the boost lifted the
+    # background security pattern into noise, and stronger sharpening thickened and haloed letters.
+    detection_crop_sharpen_amount: float = 0.4
+    detection_crop_contrast_clip: float = 0.0
     # A fourth model call per document (on top of extraction, and crop+rotation when detection is
     # on): Gemini looks at the document again alongside its own extracted fields and judges what a
     # field-by-field rule can't - MRZ-to-printed-data consistency, front/back agreement, and other

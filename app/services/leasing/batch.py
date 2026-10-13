@@ -31,6 +31,7 @@ from app.services.leasing.outputs import (
     document_folder,
     merged_folder,
     output_root,
+    save_named_result,
     upload_ocr_result,
 )
 from app.services.leasing.pairing import resolve_pairs_per_type
@@ -284,9 +285,20 @@ async def process_batch(
                 )
         del document["content"]
 
+        # A type-detected document's result is also kept on this server as <type>.pdf in the
+        # request's own folder; with no blob link, that file is its ocr_file.
+        local_result: Path | None = None
+        if document.get("_local_name") and saved_paths:
+            local_result = await save_named_result(
+                output_root() / safe_name(document_refnumber), document["_local_name"], saved_paths, merged_pdf,
+            )
+
         # A merged pair uploads one PDF beside the front's original; the back's source row points
         # at that same file.
         blob_path = items[upload_indices[0]].get("blob_path")
+        if not blob_path and local_result is not None:
+            for index in upload_indices:
+                documents_report[index]["sources"][0]["ocr_file"] = str(local_result.resolve())
         if blob_path and saved_paths:
             try:
                 ocr_path = await upload_ocr_result(

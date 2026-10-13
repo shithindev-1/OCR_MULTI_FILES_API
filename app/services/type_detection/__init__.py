@@ -16,7 +16,7 @@ the segmentation found standing in for a declared one:
 Each document is named for messages by the type found - "Passport", or "National ID 2" when there
 are several of a type - never by its file name, which may say anything. Its processed (cropped,
 rotated or merged) copy is uploaded beside the original under that type's name: National_ID.pdf,
-Passport.jpg, National_ID_2.pdf.
+Passport.pdf, National_ID_2.pdf - always a PDF, and also kept locally under that name.
 
 Modules:
   - service.py       runs a request: split the files, run the leasing batch, build the response
