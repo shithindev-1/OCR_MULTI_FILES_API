@@ -170,6 +170,13 @@ COMPANY_INTERNAL_FIELDS = ["License_Members", "Holder_Name"]
 # What the company extraction prompt asks for: the output fields plus the internal ones.
 COMPANY_EXTRACTION_FIELDS = COMPANY_DATA_FIELDS + COMPANY_INTERNAL_FIELDS
 
+# Read from an individual's documents for matching only - never returned in form_data or missing.
+# License_Members: everyone a trade licence or initial approval lists, so such a document can be
+# accepted only when it lists the tenant.
+INDIVIDUAL_INTERNAL_FIELDS = ["License_Members"]
+# What the individual extraction prompt asks for: the output fields plus the internal ones.
+INDIVIDUAL_EXTRACTION_FIELDS = DATA_FIELDS + INDIVIDUAL_INTERNAL_FIELDS
+
 TENANT_TYPE_COMPANY = "company"
 # The one document a company submission cannot go without.
 COMPANY_REQUIRED_DOCUMENT_TYPE = "trade_license"

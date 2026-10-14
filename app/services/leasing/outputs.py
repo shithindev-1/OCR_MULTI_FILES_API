@@ -158,8 +158,8 @@ def assign_type_file_names(
     in the same folder - in upload order. A name that an original in that folder already has gets
     "_ocr" added, so an original is never overwritten.
 
-    `tenant_numbers` - given when the request holds several tenants - puts the document's tenant
-    first: Tenant_1_National_ID, Tenant_2_Passport. A document shared by several tenants (a trade
+    `tenant_numbers` (the type-detection endpoints always give it, even for a single tenant) puts
+    the document's tenant first: Tenant_1_National_ID, Tenant_2_Passport. A document shared by several tenants (a trade
     licence with more than one listed signatory) carries every number: Tenant_1_2_Trade_Licence."""
     originals: dict[str, set[str]] = {}
     for item in items:

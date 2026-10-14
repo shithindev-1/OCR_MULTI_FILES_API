@@ -17,7 +17,7 @@ from PIL import Image, ImageOps
 
 from app.core.config import Settings, get_settings
 from app.core.logging import log_timestamps
-from app.schemas.ocr import COMPANY_EXTRACTION_FIELDS, DATA_FIELDS, is_company
+from app.schemas.ocr import COMPANY_EXTRACTION_FIELDS, INDIVIDUAL_EXTRACTION_FIELDS, is_company
 from app.services.gemini.prompts import (
     BOX_DETECTION_PROMPT,
     BOX_DETECTION_SCHEMA,
@@ -61,6 +61,11 @@ results_logger = logging.getLogger("uae_ocr.results")
 
 
 token_breakdown_logger = logging.getLogger("uae_ocr.token_breakdown")
+
+
+# Output room for the judgment calls (self-check, cross-check, pair confirmation). A cut-off answer
+# cannot be read, and turned every finding into 'could not be checked right now'.
+VERIFICATION_MAX_OUTPUT_TOKENS = 8192
 
 
 class GeminiServiceError(Exception):
@@ -280,7 +285,7 @@ class GeminiService:
         if is_company(tenant_type):
             system_instruction, fields = COMPANY_SYSTEM_INSTRUCTION, COMPANY_EXTRACTION_FIELDS
         else:
-            system_instruction, fields = SYSTEM_INSTRUCTION, DATA_FIELDS
+            system_instruction, fields = SYSTEM_INSTRUCTION, INDIVIDUAL_EXTRACTION_FIELDS
         system_instruction = system_instruction + "\n" + DOCUMENT_TYPE_CLASSIFICATION_INSTRUCTION
         media_type = content_type or "application/octet-stream"
         if media_type not in {"application/pdf", "image/jpeg", "image/png", "image/webp"}:
@@ -508,7 +513,9 @@ class GeminiService:
                 # kind of thing a model gets wrong more often when forced to answer in one shot with
                 # no room to work through it. A small non-zero budget overrides the shared default.
                 thinking_config=types.ThinkingConfig(thinking_budget=self.settings.gemini_verification_thinking_budget),
-                max_output_tokens=1536,
+                # Thinking counts against this ceiling and the model can think well past its
+                # budget, so the room is generous - only tokens actually generated are billed.
+                max_output_tokens=VERIFICATION_MAX_OUTPUT_TOKENS,
                 response_mime_type="application/json",
                 response_schema=ISSUES_SCHEMA,
             ),
@@ -565,7 +572,9 @@ class GeminiService:
                 # judgment call, not direct transcription, and benefits from the same small
                 # thinking budget instead of the shared zero default.
                 thinking_config=types.ThinkingConfig(thinking_budget=self.settings.gemini_verification_thinking_budget),
-                max_output_tokens=1536,
+                # Thinking counts against this ceiling and the model can think well past its
+                # budget, so the room is generous - only tokens actually generated are billed.
+                max_output_tokens=VERIFICATION_MAX_OUTPUT_TOKENS,
                 response_mime_type="application/json",
                 response_schema=ISSUES_SCHEMA,
             ),
@@ -614,7 +623,7 @@ class GeminiService:
                 # Same reasoning as self- and cross-verification: this is a judgment call, not a
                 # direct transcription, and benefits from a small non-zero thinking budget.
                 thinking_config=types.ThinkingConfig(thinking_budget=512),
-                max_output_tokens=512,
+                max_output_tokens=VERIFICATION_MAX_OUTPUT_TOKENS,
                 response_mime_type="application/json",
                 response_schema=PAIR_CONFIRMATION_SCHEMA,
             ),

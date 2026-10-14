@@ -24,14 +24,53 @@ from app.services.ocr_pipeline import (
     merge_extracted_data,
     verify_documents_across,
 )
+from app.services.post_processing import document_label
 from app.services.type_detection.tenants import (
+    LICENCE_TYPES,
     Tenant,
     Unit,
     group_companies,
     group_individuals,
+    has_link_details,
 )
 
 logger = logging.getLogger("uae_ocr.leasing")
+
+
+# Where form_data takes a value from when documents differ: the Emirates ID and visa are current
+# and UAE-issued; a passport can be years older (an old occupation, say).
+_VALUE_PRIORITY = {"national_id": 0, "visa": 1, "passport": 2}
+_ID_FIELDS = ("National_Id", "Signatory_National_Id")
+
+
+def _without_home_country_id(document: dict[str, Any]) -> dict[str, Any]:
+    """A passport's National_Id is its home-country national number (an Egyptian national number,
+    say), never the tenant's Emirates ID: it is dropped, so it can neither fill form_data nor be
+    reported as a second, different ID number."""
+    if document["document_type"] != "passport" or not any(document["data"].get(field) for field in _ID_FIELDS):
+        return document
+    return {**document, "data": {**document["data"], **{field: None for field in _ID_FIELDS}}}
+
+
+def _unmatched_message(unit: Unit, name: str, company: bool, *, several: bool) -> str:
+    """The error for a supporting document that belongs to no tenant of the request. `name` (its
+    label, e.g. "Ejari certificate 2") says which document; the fix names its plain type."""
+    whom = "any tenant in this request" if several else "the tenant"
+    kind = document_label(unit.document_type)
+    if company:
+        if has_link_details(unit, company):
+            return (f"'{name}' is not for the company on the trade licence. "
+                    f"Please upload the company's own {kind}, or remove it.")
+        return (f"We couldn't confirm that '{name}' is for the company on the trade licence. "
+                "Please upload a clearer copy.")
+    if unit.document_type in LICENCE_TYPES:
+        if has_link_details(unit, company):
+            return (f"'{name}' doesn't list {whom}. "
+                    f"Please upload a {kind} that lists {whom}, or remove it.")
+        return f"We couldn't read who is listed on '{name}'. Please upload a clearer copy."
+    if has_link_details(unit, company):
+        return f"'{name}' doesn't mention {whom}. Please upload the tenant's own {kind}, or remove it."
+    return f"We couldn't confirm that '{name}' belongs to {whom}. Please upload a clearer copy."
 
 
 async def finish_per_tenant(
@@ -86,6 +125,16 @@ async def finish_per_tenant(
             for index in key:
                 tenant_ids_by_index.setdefault(index, []).append(tenant_id)
 
+    # A supporting document that belongs to no tenant is reported on itself. It joins no tenant, so
+    # it never fails one: the tenants' own documents are still checked and extracted, it gets no
+    # processed file, and it adds nothing to form_data - only the request's status says to fix it.
+    unit_by_key = {unit.key: unit for unit in units}
+    for key in grouping.unassigned:
+        for index in key:
+            add_error(documents_report[index], _unmatched_message(
+                unit_by_key[key], items[index]["document_name"], company, several=len(grouping.tenants) > 1,
+            ))
+
     for key in (key for keys in grouping.unlisted_people for key in keys):
         for index in key:
             add_error(documents_report[index], (
@@ -121,8 +170,18 @@ async def finish_per_tenant(
                     ))
 
     # Cross-check each tenant's own documents, all tenants at once.
+    def own_documents(tenant: Tenant) -> list[dict[str, Any]]:
+        """The tenant's passed documents whose fields describe the tenant - for an individual, not a
+        licence that merely lists them - in the order form_data takes values from: the National ID
+        first, then the visa, then the passport, then the rest (the first value found wins)."""
+        documents = [
+            _without_home_country_id(passed_by_key[key]) for key in sorted(tenant.keys)
+            if key in passed_by_key and (company or passed_by_key[key]["document_type"] not in LICENCE_TYPES)
+        ]
+        return sorted(documents, key=lambda document: _VALUE_PRIORITY.get(document["document_type"], len(_VALUE_PRIORITY)))
+
     async def cross_check(tenant: Tenant) -> None:
-        documents = [passed_by_key[key] for key in tenant.keys if key in passed_by_key]
+        documents = own_documents(tenant)
         if has_errors(tenant) or len(documents) < 2 or not settings.validation_enabled:
             return
         try:
@@ -153,13 +212,11 @@ async def finish_per_tenant(
         for tenant in grouping.tenants if not has_errors(tenant)
         for key in tenant.keys if key in passed_by_key
     }
-    # With several tenants, each processed file says whose it is: Tenant_1_National_ID.pdf.
-    tenant_numbers = None
-    if len(grouping.tenants) > 1:
-        tenant_numbers = {
-            key: [number for number, tenant in enumerate(grouping.tenants, start=1) if key in tenant.keys]
-            for key in to_crop
-        }
+    # Every processed file says whose it is - also with a single tenant: Tenant_1_National_ID.pdf.
+    tenant_numbers = {
+        key: [number for number, tenant in enumerate(grouping.tenants, start=1) if key in tenant.keys]
+        for key in to_crop
+    }
     assign_type_file_names(to_crop, items, tenant_numbers)
     await run_concurrently([partial(crop_and_upload, document) for document in to_crop.values()], stage="crop_rotate_upload")
     stage_done("crop_rotate_upload", len(to_crop))
@@ -171,7 +228,7 @@ async def finish_per_tenant(
         if has_errors(tenant):
             tenants.append({"tenant_id": tenant_id, "status": "failed", "form_data": {}})
             continue
-        documents = [passed_by_key[key] for key in sorted(tenant.keys) if key in passed_by_key]
+        documents = own_documents(tenant)
         data = merge_extracted_data(documents, fields)
         if company:
             apply_signatory_role_from_license(data, documents)

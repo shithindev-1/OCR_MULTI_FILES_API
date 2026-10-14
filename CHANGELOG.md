@@ -3,6 +3,26 @@
 All notable changes to this API. Versions follow [semantic versioning](https://semver.org/): a new
 major version means a change that existing callers must adapt to.
 
+## Unreleased
+
+### Fixed (type-detection endpoints)
+- **A document that doesn't belong to the tenant is now rejected on its own.** Every supporting
+  document must be shown to belong to a tenant - also when there is only one: an individual's
+  document must print their name or ID number, and a trade licence or initial approval must LIST
+  them; a company's document must name the company or its licence number. One that doesn't gets an
+  error (e.g. "'Trade licence' doesn't list the tenant…"), no processed file and no data in
+  `form_data` - the tenant's own valid documents are still extracted and returned.
+- A trade licence that lists an individual is accepted for them, but adds nothing to their
+  `form_data`.
+- **False cross-check failures.** A passport's home-country national number is no longer taken as
+  the tenant's National ID; occupation and employer are no longer compared across documents; and
+  the check's answer is no longer cut off (which showed as "could not be checked right now").
+  `form_data` takes a value from the National ID first, then the visa, then the passport.
+
+### Changed (type-detection endpoints)
+- **Processed file names always start with the tenant**, also when there is a single tenant:
+  `Tenant_1_National_ID.pdf`, `Tenant_1_Passport.pdf` (was `National_ID.pdf`, `Passport.pdf`).
+
 ## 2.1.0 - 2026-10-09
 
 The existing endpoints keep their behaviour and response shapes.

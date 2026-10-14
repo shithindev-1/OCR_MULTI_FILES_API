@@ -315,8 +315,8 @@ National IDs).
 - `form_data` and `missing` are arrays - one entry per tenant, each with its `tenant_id`.
 - Each `documents[]` entry has `tenant_ids`, the `document_type` found, and a `status`: `valid`, `invalid` (reason in `error`), or `ignored` (not a supported type).
 - `status` at the top is `success` only when every tenant succeeded.
-- `ocr_file` is the processed copy, uploaded beside the original and named after its type -
-  `National_ID.pdf`, `Passport.pdf`, `National_ID_2.pdf`; with several tenants, `Tenant_1_National_ID.pdf`,
+- `ocr_file` is the processed copy, uploaded beside the original and named after
+  its tenant and type - also with a single tenant: `Tenant_1_National_ID.pdf`, `Tenant_1_Passport.pdf`,
   `Tenant_2_National_ID.pdf`. Every processed file is a PDF. For a file attached in form-data (no blob
   link), `ocr_file` is the path of that PDF on the server, under `postman_output\<document_refnumber>\`.
 - No National ID anywhere in an individual request (or no trade licence in a company request) ends
