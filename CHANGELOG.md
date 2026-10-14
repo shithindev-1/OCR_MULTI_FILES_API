@@ -20,6 +20,14 @@ major version means a change that existing callers must adapt to.
   `form_data` takes a value from the National ID first, then the visa, then the passport.
 
 ### Changed (type-detection endpoints)
+- **Company: a trade licence or an initial approval** now satisfies the mandatory-document rule
+  (the old `/ocr/leasing` endpoints still require a trade licence). An initial approval anchors the
+  company like a licence; a licence and an approval of the same company are one tenant.
+- **New company `form_data` keys** (type-detection endpoints only): `initial_approval_number`,
+  `initial_approval_issue_date`, `initial_approval_expiry`, `initial_approval_issuer` - read only from
+  an initial approval. The `trade_license_*` keys are read only from a trade licence.
+- **Any trade licence layout** (mainland or free zone; commercial, professional, industrial, business,
+  e-licence) is recognised as a trade licence.
 - **Processed file names always start with the tenant**, also when there is a single tenant:
   `Tenant_1_National_ID.pdf`, `Tenant_1_Passport.pdf` (was `National_ID.pdf`, `Passport.pdf`).
 

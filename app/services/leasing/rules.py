@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.schemas.ocr import (
+    COMPANY_ALTERNATIVE_DOCUMENT_TYPE,
     COMPANY_REQUIRED_DOCUMENT_TYPE,
     INDIVIDUAL_REQUIRED_DOCUMENT_TYPE,
     canonical_document_type,
@@ -58,7 +59,9 @@ def ensure_unique_document_names(names: list[str]) -> None:
         )
 
 
-def require_mandatory_document(tenant_type: str, document_types: list[str]) -> None:
+def require_mandatory_document(
+    tenant_type: str, document_types: list[str], *, accept_initial_approval: bool = False,
+) -> None:
     """Rejects a submission missing the one document its tenant type cannot go without: a trade
     licence for a company, a National ID for an individual.
 
@@ -70,7 +73,15 @@ def require_mandatory_document(tenant_type: str, document_types: list[str]) -> N
         canonical_document_type(value.strip().lower().replace(" ", "_").replace("-", "_"))
         for value in document_types
     }
-    if is_company(tenant_type):
+    if is_company(tenant_type) and accept_initial_approval:
+        # Type-detection endpoints: a trade licence or an initial approval.
+        if not declared & {COMPANY_REQUIRED_DOCUMENT_TYPE, COMPANY_ALTERNATIVE_DOCUMENT_TYPE}:
+            raise HTTPException(
+                status_code=400,
+                detail="A trade licence or initial approval is required for a company. Please upload the "
+                       "company's trade licence or initial approval and try again.",
+            )
+    elif is_company(tenant_type):
         if COMPANY_REQUIRED_DOCUMENT_TYPE not in declared:
             raise HTTPException(
                 status_code=400,

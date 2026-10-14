@@ -190,7 +190,7 @@ def test_missing_trade_licence_is_rejected_for_a_company(client: TestClient, mon
     response = _upload(client, ["eid.png"], tenant_type="company")
 
     assert response.status_code == 400
-    assert response.json()["detail"].startswith("A trade licence is required for a company.")
+    assert response.json()["detail"].startswith("A trade licence or initial approval is required for a company.")
 
 
 def test_company_with_a_listed_signatory_succeeds(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,10 +235,12 @@ def test_company_whose_listed_people_were_not_uploaded_fails(
     assert (tenant["status"], tenant["company_name_en"]) == ("failed", None)
     licence, person = body["documents"]
     assert licence["error"] == (
-        "None of the people listed on this trade licence were uploaded. "
-        "Please upload the ID documents of a person listed on the licence."
+        "None of the people listed on this trade licence or initial approval were uploaded. "
+        "Please upload the ID documents of a person it lists."
     )
-    assert person["error"].startswith("The person on 'National ID' is not listed on any uploaded trade licence.")
+    assert person["error"].startswith(
+        "The person on 'National ID' is not listed on any uploaded trade licence or initial approval."
+    )
 
 
 def test_expired_document_is_rejected_with_its_own_message(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -563,7 +565,9 @@ def test_company_tenants_are_one_per_licence_and_listed_signatory(client: TestCl
     assert body["status"] == "failed"
     zaid = body["documents"][-1]
     assert zaid["tenant_ids"] == []
-    assert zaid["error"].startswith("The person on 'National ID 3' is not listed on any uploaded trade licence.")
+    assert zaid["error"].startswith(
+        "The person on 'National ID 3' is not listed on any uploaded trade licence or initial approval."
+    )
 
 
 def test_processed_files_are_named_after_their_type(
@@ -941,7 +945,7 @@ def test_a_company_document_must_be_for_the_licence_company(
     assert body["form_data"][0]["status"] == "success"
     ejari = next(d for d in body["documents"] if d["document_type"] == "ejari_certificate")
     assert ejari["error"] == (
-        "'Ejari certificate' is not for the company on the trade licence. "
+        "'Ejari certificate' is not for the company on the trade licence or initial approval. "
         "Please upload the company's own Ejari certificate, or remove it."
     )
 
@@ -990,3 +994,70 @@ def test_a_numbered_document_is_named_once_and_the_fix_uses_its_plain_type() -> 
     assert _unmatched_message(unit, "Ejari certificate 2", company=False, several=False) == (
         "'Ejari certificate 2' doesn't mention the tenant. Please upload the tenant's own Ejari certificate, or remove it."
     )
+
+
+
+# --- company: a trade licence OR an initial approval; the approval has its own form_data keys -----
+
+APPROVAL_FIELDS = COMPANY_DATA_FIELDS + [
+    "Initial_Approval_Number", "Initial_Approval_Issue_Date", "Initial_Approval_Expiry", "Initial_Approval_Issuer",
+    "License_Members", "Holder_Name",
+]
+
+
+def test_a_company_with_only_an_initial_approval_is_accepted(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub(
+        monkeypatch,
+        segments={"approval.png": [_region("initial_approval", 1)], "eid.png": [_region("national_id", 1)]},
+        answers={
+            "approval.png": _raw(["initial_approval"], APPROVAL_FIELDS,
+                                 Initial_Approval_Number="1788073", Initial_Approval_Issue_Date="21/07/2026",
+                                 Initial_Approval_Expiry="21/01/2027", Initial_Approval_Issuer="Dep. of Economic Development",
+                                 License_Members="Cyro Alessandro Martins Cardoso (Partner); Alaa Mohamed Eltom (Partner)"),
+            "eid.png": _raw(["national_id"], APPROVAL_FIELDS, Signatory_Name_En="Cyro Alessandro Martins Cardoso",
+                            Signatory_National_Id="784-1997-0472920-3"),
+        },
+    )
+
+    body = _upload(client, ["approval.png", "eid.png"], tenant_type="company").json()
+
+    assert body["status"] == "success"
+    [tenant] = body["form_data"]
+    assert (tenant["initial_approval_number"], tenant["initial_approval_issue_date"], tenant["initial_approval_expiry"],
+            tenant["initial_approval_issuer"]) == ("1788073", "21/07/2026", "21/01/2027", "Dep. of Economic Development")
+    # The trade licence keys stay empty - an approval is not a licence.
+    assert tenant["trade_license_number"] is None and "trade_license_number" in body["missing"][0]["fields"]
+    assert (tenant["signatory_name_en"], tenant["signatory_designation"]) == ("Cyro Alessandro Martins Cardoso", "Partner")
+
+
+def test_a_licence_and_an_approval_of_one_company_are_one_tenant(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The approval prints no company name, but lists the licence's own manager.
+    _stub(
+        monkeypatch,
+        segments={
+            "tl.png": [_region("trade_license", 1)], "approval.png": [_region("initial_approval", 1)],
+            "eid.png": [_region("national_id", 1)],
+        },
+        answers={
+            "tl.png": _raw(["trade_license"], APPROVAL_FIELDS, Company_Name_En="Alpha Trading LLC",
+                           Trade_License_Number="1001", License_Members="Cyro Alessandro Martins Cardoso (Manager)"),
+            "approval.png": _raw(["initial_approval"], APPROVAL_FIELDS, Initial_Approval_Number="1788073",
+                                 License_Members="Cyro Alessandro Martins Cardoso (Partner)"),
+            "eid.png": _raw(["national_id"], APPROVAL_FIELDS, Signatory_Name_En="Cyro Alessandro Martins Cardoso"),
+        },
+    )
+
+    body = _upload(client, ["tl.png", "approval.png", "eid.png"], tenant_type="company").json()
+
+    assert body["status"] == "success"
+    [tenant] = body["form_data"]
+    assert (tenant["trade_license_number"], tenant["initial_approval_number"]) == ("1001", "1788073")
+    assert all(document["tenant_ids"] == ["tenant_1"] for document in body["documents"])
+
+
+def test_individual_responses_have_no_approval_keys(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub(monkeypatch, segments={"eid.png": [_region("national_id", 1)]}, answers={"eid.png": _raw(["national_id"])})
+
+    body = _upload(client, ["eid.png"]).json()
+
+    assert not any(key.startswith("initial_approval") for key in body["form_data"][0])

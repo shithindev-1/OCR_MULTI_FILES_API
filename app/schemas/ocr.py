@@ -167,8 +167,20 @@ COMPANY_MISSING_INFO_FIELDS = [field.lower() for field in COMPANY_DATA_FIELDS]
 # Holder_Name: whose national ID, passport or visa a document is - the signatory name in form_data
 # comes only from the national ID, so this is how the other personal documents are matched to them.
 COMPANY_INTERNAL_FIELDS = ["License_Members", "Holder_Name"]
-# What the company extraction prompt asks for: the output fields plus the internal ones.
-COMPANY_EXTRACTION_FIELDS = COMPANY_DATA_FIELDS + COMPANY_INTERNAL_FIELDS
+# An initial approval certificate's own details - kept apart from the trade licence's. Read for every
+# company request, returned only by the type-detection endpoints (the /ocr/leasing response is unchanged).
+INITIAL_APPROVAL_FIELDS = [
+    "Initial_Approval_Number",
+    "Initial_Approval_Issue_Date",
+    "Initial_Approval_Expiry",
+    "Initial_Approval_Issuer",
+]
+# What the company extraction prompt asks for: the output fields, the initial approval's own fields,
+# and the internal ones.
+COMPANY_EXTRACTION_FIELDS = COMPANY_DATA_FIELDS + INITIAL_APPROVAL_FIELDS + COMPANY_INTERNAL_FIELDS
+# A company's form_data on the type-detection endpoints: the trade licence fields plus the initial approval's.
+DETECT_COMPANY_DATA_FIELDS = COMPANY_DATA_FIELDS + INITIAL_APPROVAL_FIELDS
+DETECT_COMPANY_MISSING_INFO_FIELDS = [field.lower() for field in DETECT_COMPANY_DATA_FIELDS]
 
 # Read from an individual's documents for matching only - never returned in form_data or missing.
 # License_Members: everyone a trade licence or initial approval lists, so such a document can be
@@ -180,6 +192,8 @@ INDIVIDUAL_EXTRACTION_FIELDS = DATA_FIELDS + INDIVIDUAL_INTERNAL_FIELDS
 TENANT_TYPE_COMPANY = "company"
 # The one document a company submission cannot go without.
 COMPANY_REQUIRED_DOCUMENT_TYPE = "trade_license"
+# On the type-detection endpoints, an initial approval satisfies that rule too.
+COMPANY_ALTERNATIVE_DOCUMENT_TYPE = "initial_approval"
 # The one document an individual submission cannot go without.
 INDIVIDUAL_REQUIRED_DOCUMENT_TYPE = "national_id"
 
@@ -192,6 +206,14 @@ def fields_for_tenant_type(tenant_type: str | None) -> tuple[list[str], list[str
     """(extraction field names, form_data/missing key names) for a tenant type."""
     if is_company(tenant_type):
         return COMPANY_DATA_FIELDS, COMPANY_MISSING_INFO_FIELDS
+    return DATA_FIELDS, MISSING_INFO_FIELDS
+
+
+def detect_fields_for_tenant_type(tenant_type: str | None) -> tuple[list[str], list[str]]:
+    """Like `fields_for_tenant_type`, for the type-detection endpoints: a company also gets the
+    initial approval's own keys."""
+    if is_company(tenant_type):
+        return DETECT_COMPANY_DATA_FIELDS, DETECT_COMPANY_MISSING_INFO_FIELDS
     return DATA_FIELDS, MISSING_INFO_FIELDS
 
 

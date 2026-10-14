@@ -7,8 +7,9 @@ are grouped here, deterministically, from what was read off them:
     an ID number (National ID, passport or visa number - a visa routinely prints the passport
     number), or have the same date of birth and at least one name in common, or the same name with
     no conflicting date of birth.
-  - Company: one company per trade licence (two copies of one licence - same number or name - are
-    one company). Each person's identity documents are grouped as above, then attached to every
+  - Company: one company per trade licence or initial approval. Two of them are one company when
+    they share a number or the company name - or, for an approval that prints no company name, when it
+    lists a person the licence lists too. Each person's identity documents are grouped as above, then attached to every
     company whose licence lists that person. A company becomes one tenant per attached person, or
     one tenant with no signatory when nobody it lists was uploaded - which then fails, as a company
     needs a listed signatory (see app.services.leasing.tenant_results).
@@ -137,11 +138,11 @@ def _group_people(units: list[Unit], company: bool) -> list[_Person]:
 
 
 def _identity(unit: Unit, company: bool) -> tuple[set[str], str | None]:
-    """What a supporting document is matched on: the company's licence number and name for a
-    company, the person's ID numbers and name for an individual."""
+    """What a supporting document is matched on: the company's licence or approval number and name
+    for a company, the person's ID numbers and name for an individual."""
     if company:
-        number = _id(unit.data.get("Trade_License_Number"))
-        return ({number} if number else set()), unit.data.get("Company_Name_En")
+        numbers = {_id(unit.data.get(field)) for field in ("Trade_License_Number", "Initial_Approval_Number")}
+        return {number for number in numbers if number}, unit.data.get("Company_Name_En")
     ids, name, _ = _person_details(unit, company=False)
     return ids, name
 
@@ -211,15 +212,29 @@ def _members(unit: Unit) -> list[str]:
 def group_companies(units: list[Unit]) -> Grouping:
     unit_by_key = {unit.key: unit for unit in units}
 
+    # Licences first, so an initial approval of the same company joins the licence's company.
+    anchors = sorted(
+        (unit for unit in units if unit.document_type in LICENCE_TYPES),
+        key=lambda unit: unit.document_type != COMPANY_TYPE,
+    )
     companies: list[list[Unit]] = []
-    for unit in (unit for unit in units if unit.document_type == COMPANY_TYPE):
-        number, name = _id(unit.data.get("Trade_License_Number")), unit.data.get("Company_Name_En")
+    for unit in anchors:
+        numbers, name = _identity(unit, company=True)
+        members = _members(unit)
+
+        def same_company(company: list[Unit]) -> bool:
+            for other in company:
+                other_numbers, other_name = _identity(other, company=True)
+                if (numbers & other_numbers) or (name and other_name and same_name(name, other_name)):
+                    return True
+            # An approval printing no company name: the same company when it lists a person the
+            # company's licence lists too.
+            return bool(not name and unit.document_type != COMPANY_TYPE and any(
+                same_name(member, listed) for listed in members for other in company for member in _members(other)
+            ))
+
         for company in companies:
-            if any(
-                (number and number == _id(other.data.get("Trade_License_Number")))
-                or (name and same_name(name, other.data.get("Company_Name_En")))
-                for other in company
-            ):
+            if same_company(company):
                 company.append(unit)
                 break
         else:
@@ -245,6 +260,6 @@ def group_companies(units: list[Unit]) -> Grouping:
             ))
     unlisted = [person.keys for index, person in enumerate(people) if index not in listed]
 
-    supporting = [unit for unit in units if unit.document_type not in PERSON_TYPES and unit.document_type != COMPANY_TYPE]
+    supporting = [unit for unit in units if unit.document_type not in PERSON_TYPES and unit.document_type not in LICENCE_TYPES]
     unassigned = _attach_supporting(supporting, tenants, unit_by_key, company=True)
     return Grouping(tenants=tenants, unassigned=unassigned, unlisted_people=unlisted)

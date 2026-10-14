@@ -149,7 +149,9 @@ async def process_detected(
 
     # Same rule and message as the normal endpoints, judged on the types that were found. Each
     # tenant's own mandatory document is checked once the documents are grouped into tenants.
-    require_mandatory_document(tenant_type, [segment.document_type for _, segment in supported])
+    require_mandatory_document(
+        tenant_type, [segment.document_type for _, segment in supported], accept_initial_approval=True,
+    )
 
     labels = _labels(supported)
     origin = {label: (item, segment) for label, (item, segment) in zip(labels, supported)}

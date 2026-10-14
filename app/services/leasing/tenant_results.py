@@ -9,7 +9,7 @@ from typing import Any
 from app.core.config import settings
 from app.schemas.ocr import (
     INDIVIDUAL_REQUIRED_DOCUMENT_TYPE,
-    fields_for_tenant_type,
+    detect_fields_for_tenant_type,
     is_company,
 )
 from app.services.concurrency import run_concurrently
@@ -59,9 +59,9 @@ def _unmatched_message(unit: Unit, name: str, company: bool, *, several: bool) -
     kind = document_label(unit.document_type)
     if company:
         if has_link_details(unit, company):
-            return (f"'{name}' is not for the company on the trade licence. "
+            return (f"'{name}' is not for the company on the trade licence or initial approval. "
                     f"Please upload the company's own {kind}, or remove it.")
-        return (f"We couldn't confirm that '{name}' is for the company on the trade licence. "
+        return (f"We couldn't confirm that '{name}' is for the company on the trade licence or initial approval. "
                 "Please upload a clearer copy.")
     if unit.document_type in LICENCE_TYPES:
         if has_link_details(unit, company):
@@ -90,7 +90,7 @@ async def finish_per_tenant(
     the pipeline's field names - and `tenant_ids_by_name` (document_name -> tenant ids).
     """
     company = is_company(tenant_type)
-    fields, _ = fields_for_tenant_type(tenant_type)
+    fields, _ = detect_fields_for_tenant_type(tenant_type)
     passed_by_key = {tuple(merged_indices(document, index_by_name)): document for document in extracted}
 
     # One unit per document that was read: a merged front/back pair is one unit of both uploads.
@@ -138,8 +138,8 @@ async def finish_per_tenant(
     for key in (key for keys in grouping.unlisted_people for key in keys):
         for index in key:
             add_error(documents_report[index], (
-                f"The person on '{items[index]['document_name']}' is not listed on any uploaded trade licence. "
-                "Please upload their company's trade licence."
+                f"The person on '{items[index]['document_name']}' is not listed on any uploaded trade licence "
+                "or initial approval. Please upload their company's trade licence or initial approval."
             ))
 
     def indices(tenant: Tenant) -> list[int]:
@@ -155,8 +155,8 @@ async def finish_per_tenant(
             if not tenant.signatory_keys:
                 for index in indices(tenant):
                     add_error(documents_report[index], (
-                        "None of the people listed on this trade licence were uploaded. "
-                        "Please upload the ID documents of a person listed on the licence."
+                        "None of the people listed on this trade licence or initial approval were uploaded. "
+                        "Please upload the ID documents of a person it lists."
                     ))
 
     # Each individual needs their own National ID.

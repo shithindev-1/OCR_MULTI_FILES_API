@@ -100,7 +100,9 @@ async def process_batch(
     if not items:
         raise HTTPException(status_code=400, detail="Please add at least one document.")
     ensure_documents_complete(items, check_source=False)
-    require_mandatory_document(tenant_type, [item["document_type"] for item in items])
+    require_mandatory_document(
+        tenant_type, [item["document_type"] for item in items], accept_initial_approval=detected_types,
+    )
     fields, _ = fields_for_tenant_type(tenant_type)
 
     # document_name is assumed unique within one request - it is the only thing the pipeline's own

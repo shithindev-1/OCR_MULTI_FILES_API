@@ -5,7 +5,7 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
-from app.schemas.ocr import fields_for_tenant_type
+from app.schemas.ocr import detect_fields_for_tenant_type
 
 
 def build_detect_response(
@@ -14,7 +14,7 @@ def build_detect_response(
 ) -> dict[str, Any]:
     """The type-detection response. `tenants` is [{tenant_id, status, form_data}] with form_data in
     the pipeline's field names; each becomes one entry of the `form_data` and `missing` arrays."""
-    fields, keys = fields_for_tenant_type(tenant_type)
+    fields, keys = detect_fields_for_tenant_type(tenant_type)
     form_data, missing = [], []
     for tenant in tenants or []:
         values = {key: tenant["form_data"].get(field) for field, key in zip(fields, keys)}
