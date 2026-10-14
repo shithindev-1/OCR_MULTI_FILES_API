@@ -1024,7 +1024,7 @@ def test_a_company_with_only_an_initial_approval_is_accepted(client: TestClient,
     assert body["status"] == "success"
     [tenant] = body["form_data"]
     assert (tenant["initial_approval_number"], tenant["initial_approval_issue_date"], tenant["initial_approval_expiry"],
-            tenant["initial_approval_issuer"]) == ("1788073", "21/07/2026", "21/01/2027", "Dep. of Economic Development")
+            tenant["initial_approval_issuer"]) == ("1788073", "21-07-2026", "21-01-2027", "Dep. of Economic Development")
     # The trade licence keys stay empty - an approval is not a licence.
     assert tenant["trade_license_number"] is None and "trade_license_number" in body["missing"][0]["fields"]
     assert (tenant["signatory_name_en"], tenant["signatory_designation"]) == ("Cyro Alessandro Martins Cardoso", "Partner")
@@ -1061,3 +1061,10 @@ def test_individual_responses_have_no_approval_keys(client: TestClient, monkeypa
     body = _upload(client, ["eid.png"]).json()
 
     assert not any(key.startswith("initial_approval") for key in body["form_data"][0])
+
+
+def test_short_messages_ask_for_dd_mm_yyyy_dates() -> None:
+    from app.services.gemini.prompts import SHORT_CROSS_MESSAGES, SHORT_SELF_MESSAGES
+
+    assert "DD-MM-YYYY" in SHORT_SELF_MESSAGES and "DD-MM-YYYY" in SHORT_CROSS_MESSAGES
+    assert "12/05/2023" not in SHORT_SELF_MESSAGES

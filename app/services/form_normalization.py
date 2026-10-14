@@ -2,7 +2,7 @@
 passed - so cross-verification still compares what was actually printed on each document.
 
   - Gender: M / F -> Male / Female (any case); Male / Female in any case -> Male / Female.
-  - Dates: whatever format a document printed, reported as DD/MM/YYYY.
+  - Dates: whatever format a document printed, reported as DD-MM-YYYY (the leasing form's format).
   - Countries and nationalities: a code, another spelling or a nationality ("SY", "SYR", "syrian")
     -> the exact name in the client's country list ("Syria").
 
@@ -95,9 +95,9 @@ def _parse_date(value: str, *, birth: bool) -> date | None:
 
 
 def format_date(value: str, *, birth: bool = False) -> str:
-    """Any printed date as DD/MM/YYYY; unchanged if it cannot be read as a date."""
+    """Any printed date as DD-MM-YYYY; unchanged if it cannot be read as a date."""
     parsed = _parse_date(value, birth=birth)
-    return parsed.strftime("%d/%m/%Y") if parsed else value
+    return parsed.strftime("%d-%m-%Y") if parsed else value
 
 
 def format_gender(value: str) -> str:

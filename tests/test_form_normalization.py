@@ -26,23 +26,23 @@ def test_gender(value, expected):
 
 
 @pytest.mark.parametrize(("value", "expected"), [
-    ("04.03.2001", "04/03/2001"),
-    ("2030-04-15", "15/04/2030"),
-    ("15 APR 2030", "15/04/2030"),
-    ("April 15, 2030", "15/04/2030"),
-    ("15 JAN/JANV 2030", "15/01/2030"),
-    ("15-04-30", "15/04/2030"),
-    ("20300415", "15/04/2030"),
-    ("2030-04-15T00:00:00", "15/04/2030"),
-    ("04/23/2030", "23/04/2030"),  # day-first impossible, so month-first
+    ("04.03.2001", "04-03-2001"),
+    ("2030-04-15", "15-04-2030"),
+    ("15 APR 2030", "15-04-2030"),
+    ("April 15, 2030", "15-04-2030"),
+    ("15 JAN/JANV 2030", "15-01-2030"),
+    ("15-04-30", "15-04-2030"),
+    ("20300415", "15-04-2030"),
+    ("2030-04-15T00:00:00", "15-04-2030"),
+    ("04/23/2030", "23-04-2030"),  # day-first impossible, so month-first
     ("not a date", "not a date"),
 ])
-def test_dates_become_dd_mm_yyyy(value, expected):
+def test_dates_become_dd_mm_yyyy_with_dashes(value, expected):
     assert format_date(value) == expected
 
 
 def test_two_digit_birth_year_is_never_in_the_future():
-    assert format_date("01/02/95", birth=True) == "01/02/1995"
+    assert format_date("01/02/95", birth=True) == "01-02-1995"
 
 
 @pytest.mark.parametrize(("value", "expected"), [
@@ -68,7 +68,7 @@ def test_normalize_form_data_formats_each_kind_of_field():
         "Tenant_Name_En": "REDIET DAGIM TILAHUN", "Visa_Number": None,
     })
     assert data == {
-        "Gender": "Female", "Date_Of_Birth": "04/03/2001", "Passport_Expiry": "26/01/2031",
+        "Gender": "Female", "Date_Of_Birth": "04-03-2001", "Passport_Expiry": "26-01-2031",
         "Nationality": "Ethiopia", "Passport_Issuing_Location": "IMMIGRATION AND CITIZENSHIP SERVICE",
         "Tenant_Name_En": "REDIET DAGIM TILAHUN", "Visa_Number": None,
     }

@@ -19,7 +19,13 @@ major version means a change that existing callers must adapt to.
   the check's answer is no longer cut off (which showed as "could not be checked right now").
   `form_data` takes a value from the National ID first, then the visa, then the passport.
 
+### Changed (all endpoints - tell the .NET team)
+- **Dates in `form_data` are now `DD-MM-YYYY`** (e.g. `14-10-2026`, the leasing form's format) instead of
+  `DD/MM/YYYY`, on the old and the new endpoints. Every printed format is still recognised
+  (`04-Apr-2024`, `2024/04/28`, `28/04/2024`, `15-04-2026` -> `04-04-2024`, `28-04-2024`, `28-04-2024`, `15-04-2026`).
+
 ### Changed (type-detection endpoints)
+- Dates inside `documents[].error` messages are written as `DD-MM-YYYY` too.
 - **Company: a trade licence or an initial approval** now satisfies the mandatory-document rule
   (the old `/ocr/leasing` endpoints still require a trade licence). An initial approval anchors the
   company like a licence; a licence and an approval of the same company are one tenant.

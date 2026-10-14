@@ -107,7 +107,7 @@ app/
     result_cache.py         in-memory reuse of results for byte-identical files
     retention.py            hourly clean-up of stored originals and crops
     post_processing.py      parse model output, build /ocr error payloads
-    form_normalization.py   form_data formatting: gender, DD/MM/YYYY dates, country names
+    form_normalization.py   form_data formatting: gender, DD-MM-YYYY dates, country names
     countries.py            country lookup over app/data (codes, nationalities)
     country_learning.py     new country codes/nationalities: saved, matched by Gemini in the background
     validation.py           upload validation and rate limiting
@@ -133,7 +133,7 @@ Run the tests with `python -m pytest -q`. They make no network calls. Lint with 
 
 A company's signatory (the holder of the uploaded ID, passport or visa) must be one of the people listed on the trade licence; otherwise the request fails with a clear reason.
 
-**Formatting.** Once a request has passed every check, `form_data` values are standardised for both tenant types: gender as `Male` / `Female` (from `M`, `f`, `male`, ... in any case), every date as `DD/MM/YYYY`, and every country field (nationality, home/resident country, passport issuing location) as an exact country name from `app/data/country_codes.json` - from a 2- or 3-letter code, another name, or a nationality.
+**Formatting.** Once a request has passed every check, `form_data` values are standardised for both tenant types: gender as `Male` / `Female` (from `M`, `f`, `male`, ... in any case), every date as `DD-MM-YYYY` (e.g. `14-10-2026`), and every country field (nationality, home/resident country, passport issuing location) as an exact country name from `app/data/country_codes.json` - from a 2- or 3-letter code, another name, or a nationality.
 
 **New country names.** A nationality or home/resident country value neither list knows is returned as extracted and saved to `learned_countries/new_country_codes.json` (2-3 letters) or `learned_countries/new_nationalities.json` (anything else). In the background, Gemini gives its 2-letter country code (a short prompt - the country list is never sent) and `app/data/country_codes.json` turns the code into the exact name; the response is never delayed, and from the next request on the value is converted with no model call. Each entry (`{"name": "Syria", "code": "SY", "source": "model", "added": "..."}`, or `"name": null` when it is not a country or its code is not in the list) can be corrected by hand without a restart, and good entries moved into `app/data`. The folder is set by `COUNTRY_LEARNING_DIR`, is not in git, and must survive deployments; `COUNTRY_LEARNING_ENABLED=false` switches learning off.
 
