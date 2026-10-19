@@ -158,6 +158,7 @@ def _detection_from_corners(
     height: int,
     corners: Any,
     found: bool,
+    min_area_ratio: float = _MIN_VALID_AREA_RATIO,
 ) -> PageDetection:
     box: list[list[int]] | None = None
     if found and isinstance(corners, list) and len(corners) == 4:
@@ -168,7 +169,7 @@ def _detection_from_corners(
             ]
             for corner in corners
         ]
-        if _polygon_area(pixel_corners) >= width * height * _MIN_VALID_AREA_RATIO:
+        if _polygon_area(pixel_corners) >= width * height * min_area_ratio:
             box = pixel_corners
 
     if box is None:
@@ -415,7 +416,17 @@ def _drop_duplicate_regions(detections: list[PageDetection]) -> list[PageDetecti
     return [replace(detection, region_number=number) for number, detection in enumerate(kept, start=1)]
 
 
-def page_detections(*, page_number: int, width: int, height: int, page_result: dict[str, Any]) -> list[PageDetection]:
+def page_detections(
+    *,
+    page_number: int,
+    width: int,
+    height: int,
+    page_result: dict[str, Any],
+    drop_duplicates: bool = True,
+    min_area_ratio: float = _MIN_VALID_AREA_RATIO,
+) -> list[PageDetection]:
+    """`min_area_ratio`: the smallest share of the page a box may cover before it is taken as a broken
+    answer. The split step passes a far smaller value - one ID card on an A4 scan is under 4% of it."""
     # One page/frame can hold several separate physical documents (a card's front and back
     # photographed side by side, say), so each entry Gemini reports becomes its own detection —
     # and its own crop — rather than being merged into a single box covering both.
@@ -436,11 +447,12 @@ def page_detections(*, page_number: int, width: int, height: int, page_result: d
                     height=height,
                     corners=document.get("corners"),
                     found=True,
+                    min_area_ratio=min_area_ratio,
                 )
             )
 
     if detections:
-        return _drop_duplicate_regions(detections)
+        return _drop_duplicate_regions(detections) if drop_duplicates else detections
     return [
         _detection_from_corners(
             page_number=page_number,
@@ -783,7 +795,13 @@ async def run_detection(
     sha256: str,
     settings: Settings,
     gemini_service: DocumentVision,
+    box_detection: bool = True,
 ) -> list[Path] | None:
+    """Crops, rotates and enhances every document in a file and saves the results.
+
+    `box_detection=False` is for a file that already holds exactly one document cut to its own edges
+    (a type-detection cut-out): each page is taken whole, so no second detection call is made and
+    nothing next to the document can be picked up again - only orientation and enhancement run."""
     # Rendering/encoding/cropping/saving are CPU-bound and offloaded to worker threads so they
     # never block the event loop; the Gemini call in between is awaited natively so it runs
     # concurrently with the main extraction call in app/services/ocr_pipeline.py, not serially after it.
@@ -791,7 +809,10 @@ async def run_detection(
     try:
         images = await asyncio.to_thread(render_pages, content, mime_type, settings.detection_pdf_dpi)
         encoded_pages = await asyncio.to_thread(_encode_pages_for_detection, images)
-        page_results = await gemini_service.detect_box_corners(encoded_pages)
+        page_results = (
+            await gemini_service.detect_box_corners(encoded_pages) if box_detection
+            else [{"found": False, "documents": []} for _ in images]
+        )
         pairs = [
             (detection, image)
             for index, image in enumerate(images)

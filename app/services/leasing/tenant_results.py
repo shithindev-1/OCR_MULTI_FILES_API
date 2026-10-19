@@ -14,6 +14,7 @@ from app.schemas.ocr import (
 )
 from app.services.concurrency import run_concurrently
 from app.services.form_normalization import normalize_form_data
+from app.services.leasing.cross_messages import message_for, resolve_documents
 from app.services.leasing.outputs import assign_type_file_names
 from app.services.leasing.reports import add_error, fold_merged_pairs, merged_indices
 from app.services.leasing.signatory import apply_signatory_role_from_license
@@ -191,7 +192,16 @@ async def finish_per_tenant(
         except VerificationUnavailable:
             issues = [CROSS_VERIFICATION_UNAVAILABLE]
         own = {items[index]["document_name"]: index for index in indices(tenant)}
+        types = {name: items[index]["document_type"] for name, index in own.items()}
         for issue in issues:
+            if isinstance(issue, dict):
+                # A structured conflict: each involved document gets its own message.
+                named = resolve_documents(issue.get("documents") or [], types)
+                if not named:
+                    named = list(own)  # never drop a finding: it lands on every document
+                for label in named:
+                    add_error(documents_report[own[label]], message_for(label, {**issue, "documents": named}, types))
+                continue
             # Labels are plain type names ("Passport"), which can also appear as ordinary words in
             # a message, so a quoted label - as the prompt asks for - is matched first.
             lowered = issue.lower()

@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     gemini_api_key: str
     gemini_model: str
     gemini_max_tokens: int = 2048
+    # Decoding for every call - each is a precise reading task, not a creative one: temperature 0 and
+    # top_k 1 always take the single most likely token, top_p 1 never cuts the candidate list
+    # first, and a fixed seed makes repeat runs of the same file answer the same way.
+    gemini_temperature: float = 0.0
+    gemini_seed: int = 0
+    gemini_top_p: float = 1.0
+    gemini_top_k: int = 1
     # Model for the two crop/rotate calls (box detection, orientation). Empty = GEMINI_MODEL.
     # A Flash-Lite model is faster and cheaper for these; extraction and verification never use it.
     gemini_vision_model: str = ""

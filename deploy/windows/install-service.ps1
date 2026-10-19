@@ -10,10 +10,19 @@
     Creates .venv if it is missing, installs requirements.txt, then registers a service that
     runs `.venv\Scripts\python.exe -m app` from the project folder, starts at boot, restarts
     itself after a crash, and writes its console output to logs\service-*.log.
+
+    Several services on one VM need their own -ServiceName and display name: NSSM finds a service
+    through its display name, so two services sharing one would make every nssm command act on the
+    wrong one. The display name defaults to "UAE OCR API" for UaeOcrApi and to the service name
+    otherwise, and the script refuses a display name another service already uses:
+
+        powershell -ExecutionPolicy Bypass -File deploy\windows\install-service.ps1 `
+            -ServiceName OcrMultiFilesApi -DisplayName "OCR Multi Files API"
 #>
 [CmdletBinding()]
 param(
     [string]$ServiceName = "UaeOcrApi",
+    [string]$DisplayName = "",
     [string]$NssmPath = "nssm",
     [string]$PythonLauncher = "py"
 )
@@ -49,6 +58,14 @@ if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+if (-not $DisplayName) {
+    $DisplayName = if ($ServiceName -eq "UaeOcrApi") { "UAE OCR API" } else { $ServiceName }
+}
+$clash = Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq $DisplayName -and $_.Name -ne $ServiceName }
+if ($clash) {
+    throw "Display name '$DisplayName' is already used by service '$($clash[0].Name)'. Pass a different -DisplayName."
+}
+
 if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Write-Host "Removing existing $ServiceName service..."
     & $NssmPath stop $ServiceName confirm | Out-Null
@@ -58,7 +75,7 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
 Write-Host "Registering $ServiceName..."
 & $NssmPath install $ServiceName $Python "-m" "app"
 & $NssmPath set $ServiceName AppDirectory $ProjectRoot
-& $NssmPath set $ServiceName DisplayName "UAE OCR API"
+& $NssmPath set $ServiceName DisplayName $DisplayName
 & $NssmPath set $ServiceName Description "FastAPI OCR service for UAE identity and leasing documents."
 & $NssmPath set $ServiceName Start SERVICE_AUTO_START
 # Unbuffered output, so the service log files are written in real time.

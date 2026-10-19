@@ -184,6 +184,7 @@ SEGMENTATION_PROMPT = """You are shown {page_count} image(s), each one full page
 The file may hold one document or several different documents together - for example a National ID's front and back plus a passport page, or a trade licence followed by a visa. Find every distinct region showing a document, on every page, and for each region report:
 - document_type: exactly one of national_id (a government national identity card from any country, including a UAE Emirates ID), passport (a passport's data page or open booklet), visa (a visa or residence permit, including a visa page or sticker, an e-visa, or a residence card), bank_statement, ejari_certificate, trade_license (a trade licence of any layout or issuer - a UAE mainland or free zone commercial, professional, industrial, tourism or business licence, including e-licences), tenant_form, initial_approval, salary_certificate (including a salary statement, salary letter or payslip), tenancy_contract, cheque, or other for anything that is none of these. Judge only from what the document itself shows: an ID number, passport number or name printed on one document never makes it a different type - a visa that prints an Emirates ID number is still a visa.
 - side: front or back for the two faces of a National ID card; single for every other region.
+- covered_by: the document_number of every OTHER document lying on top of this region and hiding part of it, as in a photo of cards laid over each other; when the other side of the SAME card (its front or back, photographed separately) lies on top of this region, include this region's own document_number; an empty list when nothing lies on top of it.
 - document_number: 1, 2, 3 ... identifying which physical document the region belongs to. Regions that are parts of the SAME physical document share one number - the front and back of the same card, or consecutive pages of the same contract, statement or licence. Two different physical documents never share a number, even when they are the same type: two different people's ID cards are two documents.
 - box_2d: the region's bounding box as [ymin, xmin, ymax, xmax], each a whole number from 0 to 1000 on the image's own height and width (0 = top or left edge, 1000 = bottom or right edge). The box must contain the region completely - when unsure, make it slightly larger rather than smaller. A document that fills the whole page gets [0, 0, 1000, 1000]. Never let one region's box cover another region.
 
@@ -210,8 +211,11 @@ SEGMENTATION_SCHEMA = {
                                 # it answers in reliably. Asked for corner fractions instead, it switched
                                 # between fractions, 0-1000 and pixels from one call to the next.
                                 "box_2d": {"type": "array", "items": {"type": "integer"}},
+                                # Which documents lie on top of this one - so the part they hide can
+                                # be blanked out of this document's cut-out instead of being read as its own.
+                                "covered_by": {"type": "array", "items": {"type": "integer"}},
                             },
-                            "required": ["document_type", "side", "document_number", "box_2d"],
+                            "required": ["document_type", "side", "document_number", "box_2d", "covered_by"],
                         },
                     },
                 },
@@ -286,7 +290,11 @@ MESSAGE STYLE - this overrides the wording rules above. Write each problem as ON
 
 SHORT_CROSS_MESSAGES = """
 
-MESSAGE STYLE - this overrides the wording rules above. When two documents disagree, write ONE short message for that pair of documents, however many details differ - never one message per field - and never quote the differing values. Name each document exactly as it is labelled above, in single quotes. Keep each message under 25 words, in very simple English that anyone can understand, and end it with a short fix. If a message mentions a date, write it as DD-MM-YYYY (for example 12-05-2023). Examples: "'National ID' and 'Passport' belong to different people. Please upload documents of the same person." / "'Trade licence' and 'Ejari certificate' are for different companies. Please upload documents of the same company." / "The person on 'Passport' is not listed on 'Trade licence'. Please upload the documents of a person on the licence." """
+OUTPUT - this overrides the issues array and the wording rules above. Instead of sentences, report every disagreement in the conflicts array, one entry per detail that differs between documents:
+- documents: the labels of the documents involved, exactly as labelled above (at least two).
+- detail: what differs - one of name, date_of_birth, nationality, gender, passport_number, national_id_number, visa_number, company_name, licence_number, listed_person (the person on an ID, passport or visa is not among the people a trade licence or initial approval lists), other.
+- message: only for detail "other" (otherwise an empty string): one short sentence of plain English, under 25 words, naming the documents in single quotes and ending with a short fix; write any date as DD-MM-YYYY.
+Never quote the differing values. Return an empty conflicts array when nothing disagrees."""
 
 
 # Both verification calls share this shape: a plain list of problem sentences, empty when there is
@@ -300,6 +308,32 @@ ISSUES_SCHEMA = {
         "issues": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["issues"],
+}
+
+
+# Type-detection cross-check: what disagrees, not sentences - the per-document messages are written in
+# code (app.services.leasing.cross_messages), so each document's message is about that document.
+CONFLICT_DETAILS = [
+    "name", "date_of_birth", "nationality", "gender", "passport_number", "national_id_number", "visa_number",
+    "company_name", "licence_number", "listed_person", "other",
+]
+CONFLICTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "conflicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "documents": {"type": "array", "items": {"type": "string"}},
+                    "detail": {"type": "string", "enum": CONFLICT_DETAILS},
+                    "message": {"type": "string"},
+                },
+                "required": ["documents", "detail", "message"],
+            },
+        },
+    },
+    "required": ["conflicts"],
 }
 
 
@@ -336,3 +370,34 @@ COUNTRY_CODE_SCHEMA = {
     "properties": {"code": {"type": "string"}},
     "required": ["code"],
 }
+
+
+# What each document type must show to be accepted when part of it is covered by another document
+# (type-detection endpoints). Covered parts outside these details are acceptable.
+REQUIRED_DETAILS = {
+    "national_id": "the ID number, the holder's name, date of birth, nationality and the expiry date on the front; "
+                   "the card number on the back",
+    "passport": "the passport number, the holder's name, date of birth, nationality, sex, the expiry date and the "
+                "two lines of letters and numbers at the bottom of the data page",
+    "visa": "the visa or file number, the holder's name and the issue and expiry dates",
+    "trade_license": "the company name, the licence number, the expiry date and the list of owners or managers",
+    "initial_approval": "the approval number, the expiry date and the list of people it names",
+    "ejari_certificate": "the contract number, the tenant's name and the contract start and end dates",
+    "tenancy_contract": "the tenant's name, the property and the contract start and end dates",
+    "tenant_form": "the tenant's name and the main details filled in",
+    "salary_certificate": "the employee's name, the employer and the salary",
+    "bank_statement": "the account holder's name, the account number and the statement period",
+    "cheque": "the account holder's name, the cheque number, the amount and the date",
+}
+
+COVERED_PARTS_RULES = """
+
+COVERED PARTS - this overrides the completeness and legibility rules above. A flat light-grey area on this image is a part of the document that another document was lying on; it was blanked out on purpose. Covered, cut-off or blanked parts are acceptable and must NOT be reported, unless they hide one of the required details of a {document_type}: {required}. If a required detail is hidden, cut off or only partly visible, report one short message naming that detail - for example "The expiry date on the passport is covered. Please upload the passport without other documents on top of it." Never report a covered cover page, labels, photo, signature, background pattern or any other detail outside that list."""
+
+
+def covered_parts_rules(document_type: str) -> str:
+    """The covered-parts rules for one document type (type-detection self-check)."""
+    required = REQUIRED_DETAILS.get(
+        document_type, "the main identifying details - names, numbers and dates",
+    )
+    return COVERED_PARTS_RULES.format(document_type=document_type.replace("_", " "), required=required)

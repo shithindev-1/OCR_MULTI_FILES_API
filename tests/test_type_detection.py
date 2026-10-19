@@ -1068,3 +1068,276 @@ def test_short_messages_ask_for_dd_mm_yyyy_dates() -> None:
 
     assert "DD-MM-YYYY" in SHORT_SELF_MESSAGES and "DD-MM-YYYY" in SHORT_CROSS_MESSAGES
     assert "12/05/2023" not in SHORT_SELF_MESSAGES
+
+
+# --- cross-check: one message per document, from that document's point of view -------------------
+
+
+def test_a_passport_and_visa_conflict_gives_each_document_its_own_message(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "validation_enabled", True)
+    _stub(
+        monkeypatch,
+        segments={"visa.png": [_region("visa", 1)], "eid.png": [_region("national_id", 1)],
+                  "pp.png": [_region("passport", 1)]},
+        answers={
+            "visa.png": _raw(["visa"], Passport_Number="A1111111", **MAGDY),
+            "eid.png": _raw(["national_id"], **MAGDY),
+            "pp.png": _raw(["passport"], Passport_Number="A2222222", **MAGDY),
+        },
+    )
+
+    async def fake_cross(**kwargs: Any) -> list[dict[str, Any]]:
+        assert kwargs.get("short_messages") is True
+        return [{"documents": ["Visa", "Passport"], "detail": "passport_number", "message": ""}]
+
+    monkeypatch.setattr(get_gemini_service(), "verify_document", lambda **kwargs: _no_issues())
+    monkeypatch.setattr(get_gemini_service(), "verify_documents_cross", fake_cross)
+
+    body = _upload(client, ["visa.png", "eid.png", "pp.png"]).json()
+
+    errors = {d["document_type"]: d["error"] for d in body["documents"]}
+    assert errors["visa"] == (
+        "'Visa' shows a different passport number than 'Passport'. Please upload the visa issued for this passport."
+    )
+    assert errors["passport"] == (
+        "The passport number on 'Passport' is different from the one on 'Visa'. "
+        "Please check you uploaded the right passport."
+    )
+    assert errors["national_id"] is None
+
+
+@pytest.mark.parametrize(("conflict", "document", "expected"), [
+    ({"documents": ["National ID", "Passport"], "detail": "date_of_birth"}, "National ID",
+     "'National ID' shows a different date of birth from 'Passport'. Please upload documents of the same person."),
+    ({"documents": ["National ID", "Passport"], "detail": "date_of_birth"}, "Passport",
+     "'Passport' shows a different date of birth from 'National ID'. Please upload documents of the same person."),
+    ({"documents": ["Trade licence", "Ejari certificate"], "detail": "company_name"}, "Ejari certificate",
+     "'Ejari certificate' shows a different company name from 'Trade licence'. Please upload documents of the same company."),
+    ({"documents": ["Passport", "Trade licence"], "detail": "listed_person"}, "Passport",
+     "The person on 'Passport' is not listed on 'Trade licence'. Please upload the documents of a person it lists."),
+    ({"documents": ["Passport", "Trade licence"], "detail": "listed_person"}, "Trade licence",
+     "'Trade licence' doesn't list the person on 'Passport'. Please upload the documents of a person it lists."),
+    ({"documents": ["Visa", "National ID"], "detail": "national_id_number"}, "National ID",
+     "The ID number on 'National ID' is different from the one on 'Visa'. Please check you uploaded the right National ID."),
+    ({"documents": ["Visa", "Passport"], "detail": "other", "message": "'Visa' and 'Passport' disagree."}, "Visa",
+     "'Visa' and 'Passport' disagree."),
+])
+def test_conflict_messages_are_worded_for_each_document(conflict: dict[str, Any], document: str, expected: str) -> None:
+    from app.services.leasing.cross_messages import message_for
+
+    types = {"National ID": "national_id", "Passport": "passport", "Visa": "visa",
+             "Trade licence": "trade_license", "Ejari certificate": "ejari_certificate"}
+    assert message_for(document, conflict, types) == expected
+
+
+def test_conflict_documents_named_by_type_or_case_still_resolve() -> None:
+    from app.services.leasing.cross_messages import resolve_documents
+
+    types = {"Visa": "visa", "Passport": "passport", "National ID": "national_id",
+             "National ID 1": "national_id", "National ID 2": "national_id"}
+    assert resolve_documents(["visa", "PASSPORT"], types) == ["Visa", "Passport"]
+    assert resolve_documents(["'Visa'", "Passport"], types) == ["Visa", "Passport"]
+    # Ambiguous type: several National IDs - not guessed.
+    assert resolve_documents(["national_id", "Visa"], types) == ["Visa"]
+
+
+def test_a_card_side_lying_on_its_other_side_is_blanked_from_that_side_only() -> None:
+    # Photo of one ID: the front lies on top of the back's right half (both document 3).
+    import numpy as np
+
+    from app.services.detection import _build_detection
+    from app.services.type_detection.segmentation import COVER_FILL, _isolate, _Region
+
+    page = np.full((400, 600, 3), 90, dtype=np.uint8)
+
+    def region(box: list[list[int]], side: str, covered_by: set[int]) -> _Region:
+        detection = _build_detection(1, 1, "national_id", 600, 400, box, "gemini_vision")
+        return _Region(detection, page, "national_id", 3, side, covered_by)
+
+    back = region([[20, 150], [300, 150], [300, 330], [20, 330]], "back", {3})   # front lies on it
+    front = region([[200, 40], [480, 40], [480, 220], [200, 220]], "front", set())
+    regions = [back, front]
+
+    back_image, back_covered = _isolate(back, regions)
+    front_image, front_covered = _isolate(front, regions)
+
+    assert back_covered > 0 and tuple(back_image[180, 250]) == COVER_FILL      # shared area blanked on the back
+    assert front_covered == 0 and tuple(front_image[180, 250]) != COVER_FILL   # the front, on top, stays whole
+
+
+def test_card_sides_with_no_order_are_left_whole() -> None:
+    import numpy as np
+
+    from app.services.detection import _build_detection
+    from app.services.type_detection.segmentation import _isolate, _Region
+
+    page = np.full((400, 600, 3), 90, dtype=np.uint8)
+
+    def region(box: list[list[int]], side: str) -> _Region:
+        return _Region(_build_detection(1, 1, "national_id", 600, 400, box, "gemini_vision"), page,
+                       "national_id", 3, side, set())
+
+    back = region([[20, 150], [300, 150], [300, 330], [20, 330]], "back")
+    front = region([[200, 40], [480, 40], [480, 220], [200, 220]], "front")
+    assert _isolate(back, [back, front])[1] == 0 and _isolate(front, [back, front])[1] == 0
+
+
+def test_a_regions_own_number_in_covered_by_is_kept() -> None:
+    from app.services.type_detection.segmentation import _parse_label, _region_label
+
+    label = _region_label({"document_type": "national_id", "side": "back", "document_number": 3,
+                           "covered_by": [3, 2], "box_2d": [0, 0, 500, 500]}, 1, 0)
+    assert _parse_label(label)[3] == {3, 2}
+
+
+# --- messages say where a document was found when its file holds several --------------------------
+
+
+@pytest.mark.parametrize(("error", "document_type", "places", "expected"), [
+    ("Your visa expired on 28-04-2024. Please upload a valid visa.", "visa", [("Trade License 11.pdf", [4])],
+     "The visa found on page 4 of 'Trade License 11.pdf' expired on 28-04-2024. Please upload a valid visa."),
+    ("Your National ID expired on 28-04-2024. Please upload a valid National ID.", "national_id",
+     [("Trade License 11.pdf", [5])],
+     "The National ID found on page 5 of 'Trade License 11.pdf' expired on 28-04-2024. Please upload a valid National ID."),
+    ("The photo is too blurry. Please upload a clearer copy.", "passport", [("Trade License 11.pdf", [2, 3])],
+     "Passport found on pages 2-3 of 'Trade License 11.pdf': The photo is too blurry. Please upload a clearer copy."),
+    ("Your visa expired on 28-04-2024.", "visa", [], "Your visa expired on 28-04-2024."),   # file of its own
+    (None, "visa", [("x.pdf", [1])], None),
+])
+def test_errors_name_the_place_in_a_shared_file(error, document_type, places, expected) -> None:
+    from app.services.type_detection.service import locate_error
+
+    assert locate_error(error, document_type, places) == expected
+
+
+def test_user_9_errors_point_into_the_trade_licence_file(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The licence file also holds an old visa and an old National ID; the current ID is a file of its own.
+    monkeypatch.setattr(settings, "validation_enabled", True)
+    _stub(
+        monkeypatch,
+        segments={
+            "eid.png": [_region("national_id", 1)],
+            "bundle.png": [
+                _region("visa", 1, [{"x": 0.0, "y": 0.0}, {"x": 1.0, "y": 0.0}, {"x": 1.0, "y": 0.3}, {"x": 0.0, "y": 0.3}]),
+                _region("national_id", 2, [{"x": 0.0, "y": 0.6}, {"x": 1.0, "y": 0.6}, {"x": 1.0, "y": 0.9}, {"x": 0.0, "y": 0.9}]),
+            ],
+        },
+        answers={
+            "eid.png": _raw(["national_id"], National_Id="784-1971-6060254-2", **MAGDY),
+            "bundle_2_visa": _raw(["visa"], **MAGDY),
+            "bundle_3_national_id": _raw(["national_id"], National_Id="784-1971-6060254-2", **MAGDY),
+        },
+    )
+
+    async def fake_verify(**kwargs: Any) -> list[str]:
+        label = {"visa": "visa", "national_id": "National ID"}[kwargs["document_type"]]
+        expired = kwargs["content"] != _png("eid.png")
+        return [f"Your {label} expired on 28-04-2024. Please upload a valid {label}."] if expired else []
+
+    monkeypatch.setattr(get_gemini_service(), "verify_document", fake_verify)
+
+    body = _upload(client, ["eid.png", "bundle.png"]).json()
+
+    errors = sorted(d["error"] for d in body["documents"] if d["error"])
+    assert errors == [
+        "The National ID found on page 1 of 'bundle.png' expired on 28-04-2024. Please upload a valid National ID.",
+        "The visa found on page 1 of 'bundle.png' expired on 28-04-2024. Please upload a valid visa.",
+    ]
+    eid = next(d for d in body["documents"] if d["sources"][0]["file_name"] == "eid.png")
+    assert eid["error"] is None
+
+
+# --- usage.log counts the split calls of a type-detection request ---------------------------------
+
+
+def _record_split_tokens(monkeypatch: pytest.MonkeyPatch, regions: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Split calls that record 100 + 10 tokens each, and a capture of every usage summary logged."""
+    from app.services import ocr_pipeline
+    from app.services.gemini import usage
+
+    by_width = {_WIDTHS.setdefault(name, 400 + len(_WIDTHS)): found for name, found in regions.items()}
+
+    async def fake_segment(page_images_png: list[bytes]) -> list[dict[str, Any]]:
+        usage.record_usage(usage.CALL_SEGMENTATION, 100, 10)
+        with Image.open(io.BytesIO(page_images_png[0])) as image:
+            return [{"regions": by_width[image.width]}]
+
+    summaries: list[dict[str, Any]] = []
+
+    def capture(request_id: str, status: str, detection_enabled: bool) -> dict[str, Any]:
+        summaries.append({"status": status, **usage.usage_summary()})
+        return usage.usage_summary()
+
+    monkeypatch.setattr(get_gemini_service(), "segment_documents", fake_segment)
+    monkeypatch.setattr(ocr_pipeline, "log_usage_summary", capture)
+    return summaries
+
+
+def test_usage_includes_the_split_calls(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub(monkeypatch, segments={"eid.png": [_region("national_id", 1)], "pp.png": [_region("passport", 1)]},
+          answers={"eid.png": _raw(["national_id"], **MAGDY), "pp.png": _raw(["passport"], **MAGDY)})
+    summaries = _record_split_tokens(monkeypatch, {"eid.png": [_region("national_id", 1)], "pp.png": [_region("passport", 1)]})
+
+    _upload(client, ["eid.png", "pp.png"])
+
+    [summary] = summaries
+    assert summary["segmentation"] == {"input_tokens": 200, "output_tokens": 20, "total_tokens": 220, "calls": 2}
+
+
+def test_usage_is_logged_when_the_mandatory_document_is_missing(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub(monkeypatch, segments={"pp.png": [_region("passport", 1)]}, answers={})
+    summaries = _record_split_tokens(monkeypatch, {"pp.png": [_region("passport", 1)]})
+
+    response = _upload(client, ["pp.png"])
+
+    assert response.status_code == 400
+    assert [(s["status"], s["segmentation"]["calls"]) for s in summaries] == [("rejected", 1)]
+
+
+# --- small cards on a large page, margins, whole-page fallbacks ------------------------------------
+
+def _collage_regions() -> list[dict]:
+    # The split answer for an A4 scan holding a passport, an ID front and back (each card under 4%
+    # of the page) and a residence visa partly under the passport.
+    return [
+        {"document_type": "passport", "side": "single", "document_number": 1, "box_2d": [203, 137, 608, 642], "covered_by": []},
+        {"document_type": "national_id", "side": "front", "document_number": 2, "box_2d": [239, 649, 365, 948], "covered_by": []},
+        {"document_type": "national_id", "side": "back", "document_number": 2, "box_2d": [376, 613, 508, 908], "covered_by": []},
+        {"document_type": "visa", "side": "single", "document_number": 3, "box_2d": [581, 56, 827, 534], "covered_by": [1]},
+    ]
+
+
+def test_small_cards_on_a_large_page_are_cut_out_not_taken_as_the_whole_page() -> None:
+    import numpy as np
+
+    from app.core.config import get_settings
+    from app.services.type_detection.segmentation import build_segments
+
+    page = np.full((1650, 1168, 3), 255, dtype=np.uint8)
+    segments = build_segments([page], [{"regions": _collage_regions()}], get_settings())
+
+    assert [segment.document_type for segment in segments] == ["passport", "national_id", "visa"]
+    for segment in segments:
+        assert all(not region.method.startswith("fallback") for region in segment.regions)
+    # Only real overlaps are painted: the ID front touches nothing; the passport and the ID back share a
+    # thin strip; the visa lies under the passport's bottom edge. Nothing is near fully covered.
+    assert segments[1].covered[0] == 0.0
+    assert all(0 < share < 0.2 for share in (segments[0].covered[0], segments[1].covered[1], segments[2].covered[0]))
+
+
+def test_a_region_that_fell_back_to_the_whole_page_paints_nothing() -> None:
+    import numpy as np
+
+    from app.services.detection import _build_detection
+    from app.services.type_detection.segmentation import COVER_FILL, _isolate, _Region
+
+    page = np.full((400, 600, 3), 90, dtype=np.uint8)
+    card = _Region(_build_detection(1, 1, "visa", 600, 400, [[20, 20], [300, 20], [300, 200], [20, 200]], "gemini_vision"),
+                   page, "visa", 1, "single", set())
+    whole = _Region(_build_detection(1, 2, "passport", 600, 400, [[0, 0], [600, 0], [600, 400], [0, 400]],
+                                     "fallback_invalid_response"), page, "passport", 2, "single", set())
+
+    image, covered = _isolate(card, [card, whole])
+    assert covered == 0 and tuple(image[100, 100]) != COVER_FILL

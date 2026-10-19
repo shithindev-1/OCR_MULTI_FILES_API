@@ -6,12 +6,21 @@ import tempfile
 # Before the app is imported: test runs write their logs to a throwaway folder, never into the
 # real logs/ the service and its developers read.
 os.environ["LOG_DIR"] = tempfile.mkdtemp(prefix="ocr-test-logs-")
+# Required settings, so the tests also run in a fresh clone with no .env. Gemini is always stubbed.
+os.environ.setdefault("GEMINI_API_KEY", "test-key")
+os.environ.setdefault("GEMINI_MODEL", "test-model")
 
 import pytest  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 from app.services import ocr_pipeline, result_cache  # noqa: E402
 from app.services.validation import _rate_events  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _plain_http_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The test client talks plain HTTP; tests about HTTPS switch it back on themselves.
+    monkeypatch.setattr(settings, "require_https", False)
 
 
 @pytest.fixture(autouse=True)

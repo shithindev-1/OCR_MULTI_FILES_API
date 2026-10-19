@@ -16,12 +16,12 @@ from app.core.config import settings
 from app.schemas.leasing import SourceDocument
 from app.services import blob_storage
 from app.services.concurrency import run_concurrently
-from app.services.gemini import get_gemini_service
+from app.services.gemini import get_gemini_service, start_usage_tracking
 from app.services.leasing import sources as source_fetch
 from app.services.leasing.batch import process_batch
 from app.services.leasing.rules import require_mandatory_document
 from app.services.leasing.sources import safe_name
-from app.services.ocr_pipeline import VerificationUnavailable, call_with_one_retry
+from app.services.ocr_pipeline import VerificationUnavailable, call_with_one_retry, log_request_usage
 from app.services.post_processing import document_label
 from app.services.type_detection.responses import build_detect_response, document_entry
 from app.services.type_detection.segmentation import OTHER_TYPE, Segment, segment_file
@@ -93,6 +93,8 @@ def _batch_item(item: dict[str, Any], segment: Segment, label: str, number: int)
             batch_item["blob_path"] = item["blob_path"]
         return batch_item
 
+    # Already cut to its own edges, with other documents blanked out: the final crop takes it whole.
+    batch_item["precut"] = True
     stem = Path(item["filename"]).stem or "document"
     filename = f"{safe_name(stem)}_{document_id}{segment.extension}"
     batch_item.update(content=segment.content, filename=filename, content_type=ALLOWED_FILES[segment.extension])
@@ -102,6 +104,34 @@ def _batch_item(item: dict[str, Any], segment: Segment, label: str, number: int)
         folder = posixpath.dirname(item["blob_path"])
         batch_item["blob_path"] = posixpath.join(folder, filename) if folder else filename
     return batch_item
+
+
+def _pages_text(pages: list[int]) -> str:
+    if len(pages) == 1:
+        return f"page {pages[0]}"
+    if pages == list(range(pages[0], pages[-1] + 1)):
+        return f"pages {pages[0]}-{pages[-1]}"
+    return "pages " + ", ".join(str(page) for page in pages)
+
+
+def locate_error(error: str | None, document_type: str, places: list[tuple[str, list[int]]]) -> str | None:
+    """Says where a document was found when its file holds several documents, so a message about a
+    visa inside "Trade License 11.pdf" reads as being about that visa, not about the licence.
+
+    `places` are (file name, pages) of the sources that sit in a file with other documents; empty
+    means every source is a file of its own and the message is returned unchanged. A message starting
+    "Your <document>" is reworded to "The <document> found on page N of '<file>'"; any other message
+    gets that location in front.
+    """
+    if not error or not places:
+        return error
+    plain = document_label(document_type)  # "visa", "National ID", "trade licence"
+    label = plain[:1].upper() + plain[1:]
+    where = " and ".join(f"{_pages_text(pages)} of '{file_name}'" for file_name, pages in places if pages) or         " and ".join(f"'{file_name}'" for file_name, _ in places)
+    lead = f"your {plain}".lower()
+    if error.lower().startswith(lead):
+        return f"The {plain} found on {where}{error[len(lead):]}"
+    return f"{label} found on {where}: {error}"
 
 
 def _source_row(item: dict[str, Any], pages: list[int], ocr_file: str | None = None) -> dict[str, Any]:
@@ -117,6 +147,9 @@ async def process_detected(
     if not items:
         raise HTTPException(status_code=400, detail="Please add at least one document.")
 
+    # One token tally for the whole request, started before the split calls so they are counted
+    # too; the batch below adds to it instead of starting a new one.
+    start_usage_tracking()
     await run_concurrently([partial(_segment_one, item, document_refnumber) for item in items])
 
     def finish(status: str, documents: list[dict[str, Any]], tenants: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -127,6 +160,7 @@ async def process_detected(
 
     # A file that could not be read at all leaves nothing to judge the request by.
     if any(item.get("error") for item in items):
+        log_request_usage(document_refnumber, "failed", settings.detection_enabled)
         return finish("failed", [
             document_entry(
                 document_type="unknown" if item.get("error") else "not_checked",
@@ -149,9 +183,14 @@ async def process_detected(
 
     # Same rule and message as the normal endpoints, judged on the types that were found. Each
     # tenant's own mandatory document is checked once the documents are grouped into tenants.
-    require_mandatory_document(
-        tenant_type, [segment.document_type for _, segment in supported], accept_initial_approval=True,
-    )
+    try:
+        require_mandatory_document(
+            tenant_type, [segment.document_type for _, segment in supported], accept_initial_approval=True,
+        )
+    except HTTPException:
+        # Rejected after the split calls were already made - their tokens are still logged.
+        log_request_usage(document_refnumber, "rejected", settings.detection_enabled)
+        raise
 
     labels = _labels(supported)
     origin = {label: (item, segment) for label, (item, segment) in zip(labels, supported)}
@@ -165,9 +204,15 @@ async def process_detected(
     )
 
     by_name = result.get("tenant_ids_by_name") or {}
+    # Files that hold more than one supported document: their documents' messages say where each was found.
+    shared_files = {id(item) for item in items if sum(s.document_type != OTHER_TYPE for s in item["segments"]) > 1}
     documents = []
     for report in result["documents"]:
         names = [source["document_name"] for source in report["sources"]]
+        places = [
+            (_file_name(origin[name][0]), origin[name][1].pages)
+            for name in names if id(origin[name][0]) in shared_files
+        ]
         documents.append(document_entry(
             tenant_ids=sorted({tenant_id for name in names for tenant_id in by_name.get(name, [])},
                               key=lambda tenant_id: int(tenant_id.rsplit("_", 1)[1])),
@@ -178,7 +223,7 @@ async def process_detected(
                 _source_row(origin[name][0], origin[name][1].pages, source["ocr_file"])
                 for name, source in zip(names, report["sources"])
             ],
-            error=report["error"],
+            error=locate_error(report["error"], report["document_type"], places),
         ))
     return finish(result["status"], documents + ignored, tenants=result.get("tenants") or [])
 

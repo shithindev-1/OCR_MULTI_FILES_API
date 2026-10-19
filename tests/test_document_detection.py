@@ -739,3 +739,12 @@ def test_run_detection_returns_none_and_writes_nothing_on_detector_failure(tmp_p
 
     assert result is None
     assert list(tmp_path.iterdir()) == []
+
+
+def test_split_regions_may_be_far_smaller_than_the_box_calls_minimum() -> None:
+    # One ID card on an A4 scan covers under 4% of it.
+    small = {"found": True, "documents": [{"label": "card", "corners": _corners(0.649, 0.239, 0.948, 0.365)}]}
+
+    assert page_detections(page_number=1, width=2337, height=3300, page_result=small)[0].method == "fallback_invalid_response"
+    assert page_detections(page_number=1, width=2337, height=3300, page_result=small,
+                           min_area_ratio=0.005)[0].method == "gemini_vision"

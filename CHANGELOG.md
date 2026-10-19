@@ -6,6 +6,10 @@ major version means a change that existing callers must adapt to.
 ## Unreleased
 
 ### Fixed (type-detection endpoints)
+- **Small cards on a large scan were taken as the whole page.** An ID card on an A4 scan is under 4% of
+  the page, below the 5% sanity limit, so its region became the whole page - which then painted every
+  other document grey (a passport and visa "fully covered", the ID PDF the whole page twice). Split
+  regions now only need 0.5% of the page, and a region that falls back to the whole page paints nothing.
 - **A document that doesn't belong to the tenant is now rejected on its own.** Every supporting
   document must be shown to belong to a tenant - also when there is only one: an individual's
   document must print their name or ID number, and a trade licence or initial approval must LIST
@@ -24,7 +28,32 @@ major version means a change that existing callers must adapt to.
   `DD/MM/YYYY`, on the old and the new endpoints. Every printed format is still recognised
   (`04-Apr-2024`, `2024/04/28`, `28/04/2024`, `15-04-2026` -> `04-04-2024`, `28-04-2024`, `28-04-2024`, `15-04-2026`).
 
+### Maintenance
+- **`usage.log` now counts the split (segmentation) call of a type-detection request** - its tokens were
+  recorded and then wiped when the batch started its own tally, so detect totals were ~2,000 tokens per
+  photo too low. A detect request rejected after the split (no National ID / trade licence, or an
+  unreadable file) now also writes its usage line.
+- Decoding settings in `.env` for every Gemini call: `GEMINI_TEMPERATURE=0`, `GEMINI_SEED=0`,
+  `GEMINI_TOP_P=1`, `GEMINI_TOP_K=1` (always the single most likely answer).
+- `install-service.ps1` takes `-DisplayName` (default: "UAE OCR API" for UaeOcrApi, else the service
+  name) and refuses a display name another service already uses.
+- A rejected background job logs its plain-English reason (`reason=...`), not only the status code.
+- The system-instruction token count, which the Gemini Developer API does not support, is tried once per
+  instruction and logged once at INFO, instead of a warning with a traceback on every extraction.
+- The tests run without a local `.env` (conftest sets the required settings and plain HTTP).
+
 ### Changed (type-detection endpoints)
+- **Messages say where a document was found** when its file holds more than one document, e.g. "The visa
+  found on page 4 of 'Trade License 11.pdf' expired on 28-04-2024..." instead of "Your visa expired...". A file
+  holding a single document keeps the short message.
+- **Overlapping documents in one photo:** the split call also reports which documents lie on top of each
+  region (`covered_by`); each cut-out is taken from the document's exact outline with no margin into a
+  neighbour, and any part another document lies on is blanked light grey - including the other side of the
+  same card lying on top (e.g. an ID's front over its back). A covered part only fails a document when it
+  hides a required detail. Two different documents are never merged as duplicates, however much they overlap.
+- **Cross-check messages are written per document:** when documents disagree (e.g. a visa and a passport
+  with different passport numbers), each document gets its own message from its own point of view instead of
+  one shared sentence. The model now reports what disagrees (documents + detail); the wording is done in code.
 - Dates inside `documents[].error` messages are written as `DD-MM-YYYY` too.
 - **Company: a trade licence or an initial approval** now satisfies the mandatory-document rule
   (the old `/ocr/leasing` endpoints still require a trade licence). An initial approval anchors the

@@ -71,7 +71,11 @@ async def _run(job: Job, work: Work) -> None:
         # A request problem keeps its own (already plain-English) message; anything on our side
         # gets the general one. Either way the result is the normal response shape.
         message = str(exc.detail) if exc.status_code < 500 else COULD_NOT_FINISH
-        logger.warning("Job ended with a rejection job_id=%s status_code=%d", job.job_id, exc.status_code)
+        # The plain-English reason (the same text the caller gets) - so a 400 can be read from the log alone.
+        logger.warning(
+            "Job ended with a rejection job_id=%s status_code=%d reason=%s",
+            job.job_id, exc.status_code, str(exc.detail)[:300],
+        )
         job.result = job.failed_response(message)
     except Exception:
         logger.exception("Job failed unexpectedly job_id=%s", job.job_id)
