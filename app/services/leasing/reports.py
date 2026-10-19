@@ -89,18 +89,23 @@ def fold_merged_pairs(
     documents_report: list[dict[str, Any]], merged_pairs: list[tuple[int, int, str]],
 ) -> list[dict[str, Any]]:
     """Replaces each merged front/back pair's two entries with one `merged: true` entry carrying
-    both sources, placed where the earlier of the two was uploaded."""
+    both sources, placed where the earlier of the two was uploaded. The pair is one card, so its
+    messages are shown once: both sides' messages are kept, a message on both sides only once."""
     folded: dict[int, dict[str, Any]] = {}
     absorbed: set[int] = set()
     for front_index, back_index, document_type in merged_pairs:
         first, second = sorted((front_index, back_index))
-        folded[first] = {
+        entry = {
             "document_type": document_type,
             "document_type_is_correct": True,
             "merged": True,
             "sources": documents_report[front_index]["sources"] + documents_report[back_index]["sources"],
             "error": None,
         }
+        for index in (front_index, back_index):
+            if documents_report[index]["error"]:
+                add_error(entry, documents_report[index]["error"])
+        folded[first] = entry
         absorbed.add(second)
     return [
         folded.get(index, report)

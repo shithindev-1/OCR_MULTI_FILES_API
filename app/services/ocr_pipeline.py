@@ -150,10 +150,25 @@ def merge_extracted_data(documents: list[dict[str, Any]], fields: list[str] | No
     # the individual list, as the /ocr endpoint has always used.
     merged: dict[str, Any] = dict.fromkeys(fields or DATA_FIELDS)
     for document in documents:
+        from_passport = _shows_passport(document)
         for field, value in document["data"].items():
+            if field in PASSPORT_ONLY_FIELDS and not from_passport:
+                continue
             if merged.get(field) is None and value is not None:
                 merged[field] = value
     return merged
+
+
+# Read only from a passport: a visa, ID or contract may print a place of issue of its own.
+PASSPORT_ONLY_FIELDS = frozenset({"Passport_Issuing_Location", "Signatory_Passport_Issuing_Location"})
+
+
+def _shows_passport(document: dict[str, Any]) -> bool:
+    """The document is a passport, or a file its extraction says shows one. A document carrying
+    neither key (a merged front/back pair is built from two that do) is not restricted."""
+    if "document_type" not in document and "types_present" not in document:
+        return True
+    return document.get("document_type") == "passport" or "passport" in (document.get("types_present") or [])
 
 
 async def extract_and_type_check(

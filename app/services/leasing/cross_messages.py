@@ -33,14 +33,22 @@ _LICENCE_TYPES = {"trade_license", "initial_approval"}
 
 
 def _quoted(labels: list[str]) -> str:
+    """"'A'", "'A' and 'B'", "'A', 'B' and 'C'" - or "" for no labels."""
     quoted = [f"'{label}'" for label in labels]
-    return quoted[0] if len(quoted) == 1 else ", ".join(quoted[:-1]) + " and " + quoted[-1]
+    if len(quoted) < 2:
+        return "".join(quoted)
+    return ", ".join(quoted[:-1]) + " and " + quoted[-1]
 
 
-def resolve_documents(names: list[str], types: dict[str, str]) -> list[str]:
+def resolve_documents(
+    names: list[str], types: dict[str, str], aliases: dict[str, str] | None = None,
+) -> list[str]:
     """The labels a conflict names. The model is asked for the labels ("Visa"), but may answer with
-    another case or the document type ("visa"); a type counts only when one document has it."""
+    another case or the document type ("visa"); a type counts only when one document has it.
+    `aliases` (lower-case name -> label) maps other names of one document to its label - a card's
+    front and back sent as two files are one card, which the model may name by either side or both."""
     by_lower = {label.lower(): label for label in types}
+    by_lower.update(aliases or {})
     resolved: list[str] = []
     for name in names:
         key = str(name).strip().strip("'").lower()

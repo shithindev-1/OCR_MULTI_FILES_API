@@ -5,6 +5,22 @@ major version means a change that existing callers must adapt to.
 
 ## Unreleased
 
+### Changed (all endpoints - tell the .NET team)
+- **`passport_issuing_location` (and the signatory's) comes only from a passport**, copied exactly as printed;
+  when the passport prints it only in another language or script (e.g. Arabic), its English name is returned
+  ("الشارقة" -> "Sharjah"). A visa's or ID's own place of issue is never used; an office number is never a place
+  (null). A value that is a country is still given as the exact name from the country list.
+
+### Fixed (type-detection endpoints)
+- **A National ID sent as two files (front and back) is one entry, also when it fails:** `merged: true`, both
+  files in `sources`, and the message shown once - it used to come back as two entries with the same error.
+- A front/back pair that passed its own check but was failed by a later check (cross-check, "doesn't belong to
+  the tenant") showed `valid` with no message; it now keeps that check's message.
+- **Crash (HTTP 500) on a cross-check conflict with an ID sent as two files** when the model named the card
+  "National ID" (its sides are labelled "National ID 1" / "National ID 2"). The card is now found by any of its
+  names and called "National ID" in messages when it is the tenant's only one; a conflict naming only one known
+  document gets "doesn't match the other documents" instead of crashing.
+
 ### Fixed (type-detection endpoints)
 - **Small cards on a large scan were taken as the whole page.** An ID card on an A4 scan is under 4% of
   the page, below the 5% sanity limit, so its region became the whole page - which then painted every

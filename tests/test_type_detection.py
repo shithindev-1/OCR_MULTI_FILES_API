@@ -1341,3 +1341,142 @@ def test_a_region_that_fell_back_to_the_whole_page_paints_nothing() -> None:
 
     image, covered = _isolate(card, [card, whole])
     assert covered == 0 and tuple(image[100, 100]) != COVER_FILL
+
+
+# --- an ID sent as two files is one entry; cross-check names for it; passport issuing location -----
+
+
+def _one_card_two_files(monkeypatch: pytest.MonkeyPatch, extra: dict[str, list[dict[str, Any]]] | None = None,
+                        answers: dict[str, dict[str, Any]] | None = None) -> None:
+    _stub(
+        monkeypatch,
+        segments={"id_front.png": [_region("national_id", 1, side="front")],
+                  "id_back.png": [_region("national_id", 1, side="back")], **(extra or {})},
+        answers={
+            "id_front.png": _side(True, National_Id="784-1980-1111111-1", **AHMED),
+            "id_back.png": _side(False, National_Id="784198011111111", Occupation="Engineer"),
+            **(answers or {}),
+        },
+    )
+
+    async def same_card(**kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(get_gemini_service(), "verify_document_pair", same_card)
+
+
+def test_a_failed_card_sent_as_two_files_is_one_entry_with_one_message(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "validation_enabled", True)
+    _one_card_two_files(monkeypatch)
+    expired = "Your National ID expired on 24-04-2026. Please upload a valid National ID."
+
+    async def fake_verify(**kwargs: Any) -> list[str]:
+        return [expired]
+
+    monkeypatch.setattr(get_gemini_service(), "verify_document", fake_verify)
+
+    body = _upload(client, ["id_front.png", "id_back.png"]).json()
+
+    assert body["status"] == "failed"
+    [card] = body["documents"]
+    assert (card["merged"], card["status"], card["error"]) == (True, "invalid", expired)
+    assert [source["file_name"] for source in card["sources"]] == ["id_front.png", "id_back.png"]
+    assert card["tenant_ids"] == ["tenant_1"]
+
+
+def test_a_valid_card_failed_by_the_cross_check_keeps_its_message(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The pair passes its own check, then disagrees with the passport: the merged entry must say so.
+    monkeypatch.setattr(settings, "validation_enabled", True)
+    _one_card_two_files(
+        monkeypatch,
+        extra={"pp.png": [_region("passport", 1)]},
+        answers={"pp.png": _raw(["passport"], Passport_Number="A1234567", **AHMED)},
+    )
+
+    async def fake_cross(**kwargs: Any) -> list[dict[str, Any]]:
+        # The two sides are labelled "National ID 1" and "National ID 2"; the front's label is named.
+        return [{"documents": ["National ID 1", "Passport"], "detail": "date_of_birth", "message": ""}]
+
+    monkeypatch.setattr(get_gemini_service(), "verify_document", lambda **kwargs: _no_issues())
+    monkeypatch.setattr(get_gemini_service(), "verify_documents_cross", fake_cross)
+
+    body = _upload(client, ["id_front.png", "id_back.png", "pp.png"]).json()
+
+    assert body["status"] == "failed"
+    card, passport = body["documents"]
+    assert (card["merged"], card["status"]) == (True, "invalid")
+    assert card["error"].startswith("'National ID' shows a different date of birth from 'Passport'.")
+    assert passport["status"] == "invalid"
+
+
+def test_the_issuing_location_comes_only_from_a_passport() -> None:
+    from app.services.ocr_pipeline import merge_extracted_data
+
+    visa = {"document_type": "visa", "types_present": ["visa"],
+            "data": {"Passport_Issuing_Location": "Dubai", "Visa_Number": "201/2023/1"}}
+    passport = {"document_type": "passport", "types_present": ["passport"],
+                "data": {"Passport_Issuing_Location": "Cairo", "Passport_Number": "A1234567"}}
+
+    # The visa comes first, but its place of issue is its own, not the passport's.
+    assert merge_extracted_data([visa, passport])["Passport_Issuing_Location"] == "Cairo"
+    assert merge_extracted_data([visa])["Passport_Issuing_Location"] is None
+    # A file declared as something else that its extraction says shows a passport still counts.
+    combined = {"document_type": "visa", "types_present": ["visa", "passport"],
+                "data": {"Passport_Issuing_Location": "Cairo"}}
+    assert merge_extracted_data([combined])["Passport_Issuing_Location"] == "Cairo"
+
+
+def test_the_signatory_issuing_location_comes_only_from_a_passport() -> None:
+    from app.schemas.ocr import COMPANY_EXTRACTION_FIELDS
+    from app.services.ocr_pipeline import merge_extracted_data
+
+    licence = {"document_type": "trade_license", "types_present": ["trade_license"],
+               "data": {"Signatory_Passport_Issuing_Location": "Dubai"}}
+    passport = {"document_type": "passport", "types_present": ["passport"],
+                "data": {"Signatory_Passport_Issuing_Location": "Mumbai"}}
+
+    merged = merge_extracted_data([licence, passport], COMPANY_EXTRACTION_FIELDS)
+    assert merged["Signatory_Passport_Issuing_Location"] == "Mumbai"
+
+
+@pytest.mark.parametrize("card_name", ["National ID", "national_id", "National ID 1 + National ID 2", "National ID 2"])
+def test_a_card_sent_as_two_files_is_found_by_any_of_its_names(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, card_name: str,
+) -> None:
+    # The model may name the card by its type, its combined name or either side: never a crash, and
+    # both the card and the passport get their own message.
+    monkeypatch.setattr(settings, "validation_enabled", True)
+    _one_card_two_files(
+        monkeypatch,
+        extra={"pp.png": [_region("passport", 1)]},
+        answers={"pp.png": _raw(["passport"], Passport_Number="A1234567", **AHMED)},
+    )
+
+    async def fake_cross(**kwargs: Any) -> list[dict[str, Any]]:
+        return [{"documents": [card_name, "Passport"], "detail": "date_of_birth", "message": ""}]
+
+    monkeypatch.setattr(get_gemini_service(), "verify_document", lambda **kwargs: _no_issues())
+    monkeypatch.setattr(get_gemini_service(), "verify_documents_cross", fake_cross)
+
+    response = _upload(client, ["id_front.png", "id_back.png", "pp.png"])
+
+    assert response.status_code == 200
+    card, passport = response.json()["documents"]
+    assert card["error"] == (
+        "'National ID' shows a different date of birth from 'Passport'. Please upload documents of the same person."
+    )
+    assert passport["error"] == (
+        "'Passport' shows a different date of birth from 'National ID'. Please upload documents of the same person."
+    )
+
+
+def test_a_conflict_naming_one_known_document_never_crashes() -> None:
+    from app.services.leasing.cross_messages import message_for
+
+    message = message_for("Passport", {"documents": ["Passport"], "detail": "date_of_birth", "message": ""},
+                          {"Passport": "passport"})
+    assert message == "'Passport' doesn't match the other documents. Please upload documents that match."
