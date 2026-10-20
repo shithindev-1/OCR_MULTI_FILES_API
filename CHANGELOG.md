@@ -5,6 +5,40 @@ major version means a change that existing callers must adapt to.
 
 ## Unreleased
 
+### Added (type-detection endpoints - tell the .NET team)
+- **Rental index** (Dubai Land Department / RERA rental index result) is a supported document type:
+  `document_type: "rental_index"`, checked, cropped (`Tenant_1_Rental_Index.pdf`). It adds no form_data keys. It
+  names no person, so it must match the tenant's **Ejari certificate or tenancy contract by property** - the same
+  contract or plot number, building or area - otherwise it gets "'Rental index' doesn't match the property on the
+  tenant's Ejari certificate or tenancy contract. ...". The property details are read for that match only and
+  never returned. The older endpoints are unchanged. Its contract end date (the tenancy's, normally past at
+  renewal) is never reported as an expiry.
+
+### Changed (type-detection endpoints - tell the .NET team)
+- **An unsupported document is now an error, naming what it is.** A document outside the 11 types (a utility
+  bill, a driving licence, ...) used to come back `ignored` with no message; now it is `invalid` with
+  e.g. "The DEWA utility bill in 'bill.png' is not listed." ("found on page 2 of '<file>'" when the file holds
+  other documents). It is never read; the request is `failed`, the tenant's own
+  documents are still checked and extracted (`form_data[].status` per tenant).
+
+### Fixed (type-detection endpoints)
+- **False "date of birth does not match the back"** on an ID: the self-check misread the machine-readable date
+  (YYMMDD, 710504) against the printed one (04/05/1971). It now compares calendar dates, not formats.
+
+### Maintenance (all endpoints)
+- The SDK's "automatic function calling (AFC)" notice is no longer printed on every Gemini call: function calling
+  is switched off explicitly (no call uses tools). No change to any answer.
+
+### Hardening (type-detection endpoints)
+- **Registry safety net:** a per-type reading that comes back empty, or without the document's own number (ID,
+  passport, visa, licence or approval number), is read once more with the general instruction and its empty
+  fields filled from that - only the type's own fields, never replacing a value. A back-only ID side is exempt.
+  If the second reading fails, the first is kept. Costs an extra call only on such a miss.
+- **Several PDFs in one request** no longer fail with "We could not read '<file>'" (PDFium is not thread-safe;
+  PDF rendering now runs one document at a time).
+- **Split step:** a malformed answer part (a non-list `covered_by`, a page entry that is not an object) is
+  skipped instead of failing the file, and an answer is cached only once it was usable - a retry asks again.
+
 ### Changed (all endpoints - tell the .NET team)
 - **`passport_issuing_location` (and the signatory's) comes only from a passport**, copied exactly as printed;
   when the passport prints it only in another language or script (e.g. Arabic), its English name is returned
@@ -21,11 +55,25 @@ major version means a change that existing callers must adapt to.
   names and called "National ID" in messages when it is the tenant's only one; a conflict naming only one known
   document gets "doesn't match the other documents" instead of crashing.
 
+### Fixed (all endpoints - processed files only, response format unchanged)
+- **Processed file was the whole uncropped page.** The box-detection call sometimes answers its corners on
+  a 0-1000 scale instead of the 0-1 fractions it is asked for; every corner then clamped to the page edge,
+  the page was used whole (skewed cards, white page around them) and a card's back could be dropped as a
+  "duplicate". Both scales are now read, so each card is cropped, straightened and flattened on its own.
+  A fraction just past the edge (e.g. `1.002`, a corner placed slightly outside the image) is still read
+  as a fraction.
+- **A National ID's front and back sent as two files** came back uncropped: on that merged file the box call
+  answered x and y on different scales, with corners crossed or one far off, and the page was taken whole. Each
+  page of a merged National ID is now read axis by axis and cropped to the rectangle around the card, then
+  snapped to its edges. Other documents are cropped as before.
+
 ### Fixed (type-detection endpoints)
 - **Small cards on a large scan were taken as the whole page.** An ID card on an A4 scan is under 4% of
   the page, below the 5% sanity limit, so its region became the whole page - which then painted every
   other document grey (a passport and visa "fully covered", the ID PDF the whole page twice). Split
   regions now only need 0.5% of the page, and a region that falls back to the whole page paints nothing.
+- Cut-outs on a page shared with other documents keep a small margin (2% of the long edge), with other
+  documents inside the margin painted out, so a tight split box no longer cuts a card's edge.
 - **A document that doesn't belong to the tenant is now rejected on its own.** Every supporting
   document must be shown to belong to a tenant - also when there is only one: an individual's
   document must print their name or ID number, and a trade licence or initial approval must LIST
@@ -59,6 +107,14 @@ major version means a change that existing callers must adapt to.
 - The tests run without a local `.env` (conftest sets the required settings and plain HTTP).
 
 ### Changed (type-detection endpoints)
+- **Stricter per-type reading:** a value counts only when printed under its own field label; codes, office
+  numbers and serials never fill a name, place, nationality or date field; a place field with no letters is
+  dropped (an Egyptian passport's "Issuing Office: 3" no longer becomes the issuing location).
+- **Document-type registry** (`app/services/document_registry.py`): each of the 11 document types has its
+  own entry - fields, focused extraction instruction, required details (covered-parts check) and the numbers
+  that link it to a tenant. Detect endpoints read every document with its type's own short instruction and
+  fields instead of the one long instruction (about 13% fewer input and 30% fewer output tokens on a test
+  photo); the independent type check is kept. The old endpoints keep the general instruction unchanged.
 - **Messages say where a document was found** when its file holds more than one document, e.g. "The visa
   found on page 4 of 'Trade License 11.pdf' expired on 28-04-2024..." instead of "Your visa expired...". A file
   holding a single document keeps the short message.

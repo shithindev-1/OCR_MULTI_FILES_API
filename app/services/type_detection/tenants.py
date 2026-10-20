@@ -19,6 +19,9 @@ shown to belong to it - even when the request has a single tenant:
   - Individual: the document prints the tenant's ID, passport or visa number, or their name. A trade
     licence or initial approval must LIST the tenant among its members.
   - Company: the document prints the company's licence number or name.
+  - A rental index (type-detection only) names no person or company: it belongs to the tenant whose
+    Ejari certificate or tenancy contract is for the same property - the same contract or plot number,
+    building or area.
 A document that belongs to no tenant stays unassigned; the caller reports it as an error.
 
 Each unit is one document: a key (anything hashable the caller uses to find it again), its type,
@@ -29,6 +32,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Hashable
 
+from app.services.document_registry import link_numbers
 from app.services.form_normalization import format_date
 from app.services.names import name_tokens, same_name
 
@@ -38,9 +42,12 @@ COMPANY_TYPE = "trade_license"
 # list, never on the tenant fields.
 LICENCE_TYPES = frozenset({"trade_license", "initial_approval"})
 
-_INDIVIDUAL_IDS = ("National_Id", "Passport_Number", "Visa_Number")
-_SIGNATORY_IDS = ("Signatory_National_Id", "Signatory_Passport_Number", "Signatory_Visa_Number")
 _MEMBER = re.compile(r"^\s*(?P<name>[^()]+?)\s*(?:\([^()]*\))?\s*$")
+RENTAL_INDEX_TYPE = "rental_index"
+# The documents that say which property a tenancy is for.
+PROPERTY_SOURCE_TYPES = frozenset({"ejari_certificate", "tenancy_contract"})
+_ORDINALS = {"first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5"}
+_WORD = re.compile(r"[a-z0-9]+")
 
 
 @dataclass
@@ -106,11 +113,11 @@ class _Person:
 def _person_details(unit: Unit, company: bool) -> tuple[set[str], str | None, str | None]:
     data = unit.data
     if company:
-        ids = {_id(data.get(name)) for name in _SIGNATORY_IDS}
+        ids = {_id(data.get(name)) for name in link_numbers(unit.document_type, company=True)}
         name = data.get("Signatory_Name_En") or data.get("Holder_Name")
         birth = None
     else:
-        ids = {_id(data.get(name)) for name in _INDIVIDUAL_IDS}
+        ids = {_id(data.get(name)) for name in link_numbers(unit.document_type, company=False)}
         name, birth = data.get("Tenant_Name_En"), _birth(data.get("Date_Of_Birth"))
     return {value for value in ids if value}, name, birth
 
@@ -141,15 +148,43 @@ def _identity(unit: Unit, company: bool) -> tuple[set[str], str | None]:
     """What a supporting document is matched on: the company's licence or approval number and name
     for a company, the person's ID numbers and name for an individual."""
     if company:
-        numbers = {_id(unit.data.get(field)) for field in ("Trade_License_Number", "Initial_Approval_Number")}
+        numbers = {_id(unit.data.get(field)) for field in link_numbers(unit.document_type, company=True)}
         return {number for number in numbers if number}, unit.data.get("Company_Name_En")
     ids, name, _ = _person_details(unit, company=False)
     return ids, name
 
 
+def _place_words(value: Any) -> set[str]:
+    """"Al Barsha First" -> {"al", "barsha", "1"}: a place name's words, an ordinal as its number."""
+    return {_ORDINALS.get(word, word) for word in _WORD.findall(str(value or "").lower())}
+
+
+def _same_place(first: Any, second: Any) -> bool:
+    """One place name's words all appear in the other ("Al Barsha 1" and "AL BARSHA 1, DUBAI")."""
+    a, b = _place_words(first), _place_words(second)
+    return bool(a and b) and (a <= b or b <= a)
+
+
+def _digits(value: Any) -> str:
+    return re.sub(r"\D", "", str(value or ""))
+
+
+def same_property(index: dict[str, Any], tenancy: dict[str, Any]) -> bool:
+    """Whether a rental index is for the property of an Ejari certificate or tenancy contract: the same
+    contract or plot number, or the same building, or the same area."""
+    for name in ("Property_Contract_Number", "Property_Plot_Number"):
+        number = _digits(index.get(name))
+        if number and number == _digits(tenancy.get(name)):
+            return True
+    return any(_same_place(index.get(name), tenancy.get(name)) for name in ("Property_Building", "Property_Area"))
+
+
 def has_link_details(unit: Unit, company: bool) -> bool:
     """Whether anything was read off the document that it could be matched on at all - so a
     document that names someone else can be told apart from one whose details were unreadable."""
+    if unit.document_type == RENTAL_INDEX_TYPE:
+        return any(unit.data.get(field) for field in ("Property_Contract_Number", "Property_Plot_Number",
+                                                      "Property_Building", "Property_Area"))
     if not company and unit.document_type in LICENCE_TYPES:
         return bool(_members(unit))
     ids, name = _identity(unit, company)
@@ -158,6 +193,11 @@ def has_link_details(unit: Unit, company: bool) -> bool:
 
 def _belongs(unit: Unit, tenant: Tenant, unit_by_key: dict[Hashable, Unit], company: bool) -> bool:
     """Whether a supporting document is shown to belong to `tenant` - see the module docstring."""
+    if unit.document_type == RENTAL_INDEX_TYPE:
+        return any(
+            same_property(unit.data, unit_by_key[key].data) for key in tenant.keys
+            if unit_by_key[key].document_type in PROPERTY_SOURCE_TYPES
+        )
     if company:
         ids, name = _identity(unit, company=True)
         for key in tenant.company_keys:
@@ -182,7 +222,8 @@ def _attach_supporting(
     """Adds each supporting document to the tenant(s) it belongs to; returns those that belong to
     none. A company document joins every tenant of that company (one per signatory)."""
     unassigned: list[Hashable] = []
-    for unit in supporting:
+    # A rental index is matched on the tenancy documents that join a tenant here, so it goes last.
+    for unit in sorted(supporting, key=lambda unit: unit.document_type == RENTAL_INDEX_TYPE):
         owners = [tenant for tenant in tenants if _belongs(unit, tenant, unit_by_key, company)]
         if not owners:
             unassigned.append(unit.key)

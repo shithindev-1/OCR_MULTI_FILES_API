@@ -133,6 +133,40 @@ def test_page_detections_converts_normalized_fractions_to_pixels() -> None:
     assert detection.axis_aligned_bbox == [40, 30, 360, 270]
 
 
+def test_page_detections_reads_corners_on_the_0_to_1000_scale() -> None:
+    # A real answer (ID front and back scanned tilted on one A4 page): the model gave its corners on
+    # 0-1000 instead of fractions. Read as fractions they clamped to the page edge, both cards fell back
+    # to the full page and the back was then dropped as its "duplicate".
+    detections = page_detections(
+        page_number=1,
+        width=2481,
+        height=3508,
+        page_result={"found": True, "documents": [
+            {"label": "national id front", "corners": [
+                {"x": 235, "y": 204}, {"x": 816, "y": 167}, {"x": 786, "y": 344}, {"x": 172, "y": 361}]},
+            {"label": "national id back", "corners": [
+                {"x": 133, "y": 453}, {"x": 768, "y": 438}, {"x": 725, "y": 628}, {"x": 75, "y": 634}]},
+        ]},
+    )
+
+    assert [detection.method for detection in detections] == ["gemini_vision", "gemini_vision"]
+    assert detections[0].box == [[583, 716], [2024, 586], [1950, 1207], [427, 1266]]
+    assert detections[1].box == [[330, 1589], [1905, 1537], [1799, 2203], [186, 2224]]
+
+
+def test_page_detections_falls_back_on_pixel_corners() -> None:
+    # Pixel corners beyond 1000 are on an unknown image size, so they are not guessed at.
+    detections = page_detections(
+        page_number=1,
+        width=400,
+        height=300,
+        page_result={"found": True, "documents": [{"label": "card", "corners": _corners(100, 100, 1500, 1200)}]},
+    )
+
+    assert detections[0].method == "fallback_invalid_response"
+    assert detections[0].box == [[0, 0], [400, 0], [400, 300], [0, 300]]
+
+
 def test_page_detections_returns_one_detection_per_document_in_the_same_frame() -> None:
     detections = page_detections(
         page_number=1,
@@ -741,6 +775,20 @@ def test_run_detection_returns_none_and_writes_nothing_on_detector_failure(tmp_p
     assert list(tmp_path.iterdir()) == []
 
 
+def test_corner_fractions_just_past_the_edge_are_still_fractions() -> None:
+    # The prompt asks for an uncertain corner slightly outside the edge, so 1.002 is a fraction.
+    detection = page_detections(
+        page_number=1,
+        width=1000,
+        height=1000,
+        page_result={"found": True, "documents": [{"label": "passport", "corners": [
+            {"x": 0.207, "y": 0.007}, {"x": 1.002, "y": 0.063}, {"x": 0.772, "y": 0.999}, {"x": 0.0, "y": 0.966}]}]},
+    )[0]
+
+    assert detection.method == "gemini_vision"
+    assert detection.box == [[207, 7], [1000, 63], [772, 999], [0, 966]]
+
+
 def test_split_regions_may_be_far_smaller_than_the_box_calls_minimum() -> None:
     # One ID card on an A4 scan covers under 4% of it.
     small = {"found": True, "documents": [{"label": "card", "corners": _corners(0.649, 0.239, 0.948, 0.365)}]}
@@ -748,3 +796,61 @@ def test_split_regions_may_be_far_smaller_than_the_box_calls_minimum() -> None:
     assert page_detections(page_number=1, width=2337, height=3300, page_result=small)[0].method == "fallback_invalid_response"
     assert page_detections(page_number=1, width=2337, height=3300, page_result=small,
                            min_area_ratio=0.005)[0].method == "gemini_vision"
+
+
+def test_pdfs_are_rendered_one_at_a_time() -> None:
+    # PDFium is not thread-safe: several PDFs of one request rendered in parallel threads crashed.
+    import threading
+
+    from app.services import detection
+
+    pdf_buffer = io.BytesIO()
+    Image.new("RGB", (200, 120), "white").save(pdf_buffer, format="PDF")
+    content = pdf_buffer.getvalue()
+    inside, most = 0, 0
+    guard = threading.Lock()
+    original = detection._render_pdf_pages_locked
+
+    def counting(*args, **kwargs):
+        nonlocal inside, most
+        with guard:
+            inside += 1
+            most = max(most, inside)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            with guard:
+                inside -= 1
+
+    detection._render_pdf_pages_locked = counting
+    try:
+        threads = [threading.Thread(target=detection.render_pages, args=(content, "application/pdf", 72)) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        detection._render_pdf_pages_locked = original
+    assert most == 1
+
+
+def test_corners_in_a_crossed_order_are_still_a_document() -> None:
+    # Answered top-left, bottom-right, top-right, bottom-left: traced as given it is a bow-tie with no area.
+    crossed = [{"x": 0.082, "y": 0.286}, {"x": 0.907, "y": 0.673}, {"x": 0.894, "y": 0.285}, {"x": 0.084, "y": 0.673}]
+    result = {"found": True, "documents": [{"label": "national id back", "corners": crossed}]}
+    detection = page_detections(page_number=1, width=1000, height=1000, page_result=result, order_corners=True)[0]
+
+    assert detection.method == "gemini_vision"
+    assert detection.box == [[82, 285], [907, 285], [907, 673], [82, 673]]
+    # Only a National ID's merged front/back gets this: every other crop is read as before.
+    assert page_detections(page_number=1, width=1000, height=1000, page_result=result)[0].method == "fallback_invalid_response"
+
+
+def test_a_merged_id_page_with_x_and_y_on_different_scales_is_still_cropped() -> None:
+    # Seen live: x as fractions, y on 0-1000, and one corner far off (0.74) - in a single answer.
+    mixed = [{"x": 0.076, "y": 240.0}, {"x": 0.916, "y": 243.0}, {"x": 0.917, "y": 641.0}, {"x": 0.74, "y": 633.0}]
+    result = {"found": True, "documents": [{"label": "national id front", "corners": mixed}]}
+    detection = page_detections(page_number=1, width=3334, height=4445, page_result=result, order_corners=True)[0]
+
+    assert detection.method == "gemini_vision"
+    assert detection.axis_aligned_bbox == [253, 1067, 3057, 2849]

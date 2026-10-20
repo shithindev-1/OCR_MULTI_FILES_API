@@ -187,8 +187,10 @@ async def process_batch(
                 document_type=validated.document_type,
                 started_at=started_at,
                 tenant_type=tenant_type,
-                # Detected types get the strict check below instead of the lenient one.
+                # Detected types get the strict check below instead of the lenient one, and are read
+                # with their type's own registry instruction.
                 check_type=not detected_types,
+                focused=detected_types,
             )
         except HTTPException as exc:
             # The pipeline turns a GeminiServiceError into HTTPException(502, "OCR provider unavailable").
@@ -207,6 +209,8 @@ async def process_batch(
 
         report["document_type_is_correct"] = True
         candidate["_document_id"] = item["document_id"]
+        if item.get("covered_error"):
+            candidate["_covered_error"] = item["covered_error"]
         return candidate, False
 
     outcomes = await run_concurrently(
@@ -230,6 +234,12 @@ async def process_batch(
 
     # 3. Self-verification of every document that got this far, all at once.
     async def verify_one(index: int, document: dict[str, Any]) -> bool:
+        if document.get("_covered_error"):
+            # Mostly hidden under another document (type-detection cut-out): rejected without a self-check.
+            for upload_index in merged_indices(document, index_by_name):
+                documents_report[upload_index]["error"] = document["_covered_error"]
+            del document["content"]
+            return False
         try:
             await run_self_verification(
                 request_id=request_id,
@@ -280,6 +290,8 @@ async def process_batch(
                 settings=per_document_settings,
                 gemini_service=get_gemini_service(),
                 box_detection=not items[upload_indices[0]].get("precut"),
+                # A National ID's front and back sent as two files, merged into one PDF.
+                merged_national_id=is_merged and document["document_type"] == "national_id",
             )
             if is_merged and saved_paths:
                 merged_pdf = await asyncio.to_thread(

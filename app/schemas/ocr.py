@@ -39,6 +39,16 @@ DATA_FIELDS = [
 # visa included - is complete as submitted, so a single-page upload of one never raises an
 # incomplete error.
 FRONT_BACK_TYPES = frozenset({"national_id"})
+# What the type-detection split calls a document outside the supported types.
+OTHER_DOCUMENT_TYPE = "other"
+# Types the type-detection endpoints recognise on top of VERIFIABLE_TYPES. The older endpoints keep their
+# own list: a caller there declares the type, and their prompts are unchanged.
+DETECT_ONLY_TYPES = frozenset({"rental_index"})
+# Property details read (never returned in form_data) to match a rental index to the tenant's Ejari or
+# tenancy contract - type-detection endpoints only.
+PROPERTY_FIELDS = [
+    "Property_Area", "Property_Building", "Property_Plot_Number", "Property_Unit_Number", "Property_Contract_Number",
+]
 
 # Every type the extraction pass is taught to recognise by name, and therefore every type whose
 # selection can be checked against what the file actually shows. These are exactly the values the
@@ -58,6 +68,8 @@ VERIFIABLE_TYPES = frozenset({
     "tenancy_contract",
     "cheque",
 })
+# Every type the type-detection endpoints recognise.
+DETECT_DOCUMENT_TYPES = VERIFIABLE_TYPES | DETECT_ONLY_TYPES
 
 # Other spellings of the VERIFIABLE_TYPES, keyed by their normalised form (lowercase, underscores).
 # Applied both to the type a caller declares and to the types the model reports, so "Salary
@@ -80,6 +92,10 @@ DOCUMENT_TYPE_ALIASES = {
     "statement_of_account": "bank_statement",
     "initialapproval": "initial_approval",
     "initial_approval_letter": "initial_approval",
+    "rental_index_result": "rental_index",
+    "rental_index_certificate": "rental_index",
+    "rera_rental_index": "rental_index",
+    "dld_rental_index": "rental_index",
     "salary_certificate_letter": "salary_certificate",
     "salary_cert": "salary_certificate",
     "salary_statement": "salary_certificate",

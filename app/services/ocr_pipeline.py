@@ -21,14 +21,16 @@ from pypdf import PdfReader, PdfWriter
 from app.core.config import settings
 from app.core.exceptions import ValidationStopped
 from app.schemas.ocr import (
+    COMPANY_EXTRACTION_FIELDS,
     DATA_FIELDS,
     FRONT_BACK_TYPES,
+    INDIVIDUAL_EXTRACTION_FIELDS,
     MISSING_INFO_FIELDS,
     ErrorInfo,
     OcrResponse,
     is_company,
 )
-from app.services import result_cache
+from app.services import document_registry, result_cache
 from app.services.detection import run_detection, save_merged_document
 from app.services.gemini import (
     GeminiServiceError,
@@ -171,6 +173,72 @@ def _shows_passport(document: dict[str, Any]) -> bool:
     return document.get("document_type") == "passport" or "passport" in (document.get("types_present") or [])
 
 
+# Fields that name a place or nationality: a value with no letter at all ("3", an office code) is
+# never one, so a focused reading drops it rather than return it.
+PLACE_FIELDS = frozenset({
+    "Nationality", "Passport_Issuing_Location", "Signatory_Passport_Issuing_Location",
+    "Home_Country", "Home_State_Emirates", "Home_City", "Home_Subdivision_Location",
+    "Resident_Country", "Resident_State_Emirates", "Resident_City", "Resident_Subdivision_Location",
+})
+
+
+def drop_numeric_places(data: dict[str, Any]) -> dict[str, Any]:
+    """`data` with any place field that holds no letter set to None."""
+    return {
+        field: None if field in PLACE_FIELDS and value is not None and not any(ch.isalpha() for ch in str(value))
+        else value
+        for field, value in data.items()
+    }
+
+
+def _needs_general_reading(
+    document_type: str, tenant_type: str | None, data: dict[str, Any], raw_response: dict[str, Any],
+) -> bool:
+    """A focused reading is a safety risk when it read nothing at all, or missed the document's own
+    number (an ID's ID number, a passport's passport number, ...) - except on the back of a National
+    ID shown alone, which need not print it."""
+    fields = document_registry.extraction_fields(document_type, is_company(tenant_type))
+    if fields is None:
+        return False  # not a registry type: it was already read with the general instruction
+    general = COMPANY_EXTRACTION_FIELDS if is_company(tenant_type) else INDIVIDUAL_EXTRACTION_FIELDS
+    if not set(fields) & set(general):
+        return False  # nothing the general instruction reads (a rental index's property details)
+    if not any(value is not None for value in data.values()):
+        return True
+    numbers = document_registry.own_numbers(document_type, is_company(tenant_type))
+    if not numbers or any(data.get(field) is not None for field in numbers):
+        return False
+    back_only = document_type in FRONT_BACK_TYPES and not raw_response.get("frontVisible", True)
+    return not back_only
+
+
+async def _fill_from_general_reading(data: dict[str, Any], **reading: Any) -> dict[str, Any]:
+    """The focused reading with its empty fields filled from a reading with the general instruction -
+    the one the older endpoints use - so a focused reading is never poorer than that. Only the type's
+    own fields are filled; if the second reading fails, the focused reading is kept as it is."""
+    try:
+        general = await extract_and_type_check(**reading, check_type=False, focused=False)
+    except HTTPException:
+        logger.warning(
+            "Focused reading kept without second reading request_id=%s document=%s reason=general_reading_failed",
+            reading["request_id"], reading["position"],
+        )
+        return data
+    general_data = drop_numeric_places(general["data"])
+    own_fields = set(
+        document_registry.extraction_fields(reading["document_type"], is_company(reading["tenant_type"])) or data
+    )
+    filled = [
+        field for field, value in data.items()
+        if field in own_fields and value is None and general_data.get(field) is not None
+    ]
+    logger.info(
+        "Focused reading completed by a general reading request_id=%s document=%s type=%s filled=%d",
+        reading["request_id"], reading["position"], reading["document_type"], len(filled),
+    )
+    return {field: general_data[field] if field in filled else value for field, value in data.items()}
+
+
 async def extract_and_type_check(
     *,
     request_id: str,
@@ -184,8 +252,11 @@ async def extract_and_type_check(
     started_at: float,
     tenant_type: str | None = None,
     check_type: bool = True,
+    focused: bool = False,
 ) -> dict[str, Any]:
     """Extraction plus the type-match check - shared by a real upload and a synthetic merged file.
+
+    `focused` reads the document with its type's own registry instruction (type-detection endpoints).
 
     `check_type=False` skips the type-match check, for a caller that makes its own from the
     returned `types_present`.
@@ -201,6 +272,9 @@ async def extract_and_type_check(
     # The tenant type picks a different prompt and field list, so it is part of the key: a company
     # reading of a file is never handed to an individual request for the same file, or back.
     cache_key = ("extraction", settings.gemini_model, "company" if is_company(tenant_type) else "individual", sha256)
+    if focused:
+        # A focused reading depends on the type it was told, so the type is part of its key.
+        cache_key = cache_key + ("focused", document_type)
     raw_response = result_cache.get(cache_key)
     if raw_response is not None:
         logger.info(
@@ -215,6 +289,8 @@ async def extract_and_type_check(
                 document_name=document_name,
                 document_type=document_type,
                 tenant_type=tenant_type,
+                # Only passed when set, so the general endpoints' call is unchanged.
+                **({"focused": True} if focused else {}),
             )
         except GeminiServiceError as exc:
             del content
@@ -246,10 +322,19 @@ async def extract_and_type_check(
             default_reference_id=request_id,
         ))
 
+    data = raw_response.get("data") or {}
+    if focused:
+        data = drop_numeric_places(data)
+        if _needs_general_reading(document_type, tenant_type, data, raw_response):
+            data = await _fill_from_general_reading(
+                data, request_id=request_id, position=position, content=content, filename=filename,
+                mime_type=mime_type, sha256=sha256, document_name=document_name,
+                document_type=document_type, started_at=started_at, tenant_type=tenant_type,
+            )
     return {
         "document_name": document_name,
         "document_type": document_type,
-        "data": raw_response.get("data") or {},
+        "data": data,
         "content": content,
         "mime_type": mime_type,
         "sha256": sha256,

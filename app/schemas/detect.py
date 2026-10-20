@@ -39,8 +39,9 @@ class DetectedDocument(BaseModel):
     document_type: str = Field(..., description='The type found, e.g. "national_id"; "other" when unsupported.')
     status: Literal["valid", "invalid", "ignored", "not_checked"] = Field(
         ...,
-        description="valid: passed its own checks. invalid: see error. ignored: not a supported type, "
-                    "never checked. not_checked: another file could not be read, so nothing was checked.",
+        description='valid: passed its own checks. invalid: see error - an "other" (unsupported) document is '
+                    "invalid, its error naming what it is. not_checked: another file could not be read, so "
+                    "nothing was checked.",
     )
     merged: bool
     sources: list[DetectedSource]

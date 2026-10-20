@@ -159,20 +159,61 @@ def test_type_must_be_confirmed_by_the_extraction_reading(client: TestClient, mo
     assert body["form_data"] == []
 
 
-def test_unsupported_documents_are_ignored(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+
+
+
+
+
+
+def test_an_unsupported_document_is_rejected_by_name_and_never_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     extracted = _stub(
         monkeypatch,
-        segments={"eid.png": [_region("national_id", 1)], "bill.png": [_region("other", 1)]},
-        answers={"eid.png": _raw(["national_id"])},
+        segments={"eid.png": [_region("national_id", 1)],
+                  "bill.png": [{**_region("other", 1), "document_name": "DEWA utility bill"}]},
+        answers={"eid.png": _raw(["national_id"], National_Id="784-1985-1234567-1", **AHMED)},
     )
 
     body = _upload(client, ["eid.png", "bill.png"]).json()
 
-    assert body["status"] == "success"
-    assert extracted == ["eid.png"]
-    ignored = body["documents"][-1]
-    assert (ignored["document_type"], ignored["status"], ignored["error"]) == ("other", "ignored", None)
-    assert ignored["sources"][0]["file_name"] == "bill.png"
+    assert extracted == ["eid.png"]                       # never read
+    assert body["status"] == "failed"                     # the request says to fix it ...
+    [tenant] = body["form_data"]
+    assert tenant["status"] == "success"                  # ... the tenant is still checked and extracted
+    bill = body["documents"][-1]
+    assert (bill["document_type"], bill["status"], bill["tenant_ids"]) == ("other", "invalid", [])
+    assert bill["error"] == "The DEWA utility bill in 'bill.png' is not listed."
+    assert "detected_type" not in bill
+
+
+def test_an_unsupported_document_inside_a_shared_file_says_where_it_is() -> None:
+    from app.services.type_detection.segmentation import Segment
+    from app.services.type_detection.service import _unsupported_error
+
+    assert _unsupported_error(Segment("other", [2], detected_type="Driving licence"), "docs.pdf", shared=True) == (
+        "The driving licence found on page 2 of 'docs.pdf' is not listed."
+    )
+    assert _unsupported_error(Segment("other", [1]), "x.png", shared=False) == (
+        "The document in 'x.png' is not listed."
+    )
+
+
+def test_the_split_reads_the_name_of_an_unsupported_document() -> None:
+    import numpy as np
+
+    from app.core.config import get_settings
+    from app.services.type_detection.segmentation import build_segments
+
+    page = np.full((1000, 800, 3), 255, np.uint8)
+    regions = [
+        {"document_type": "passport", "document_name": "", "side": "single", "document_number": 1,
+         "box_2d": [0, 0, 480, 1000], "covered_by": []},
+        {"document_type": "other", "document_name": "  DEWA   utility bill ", "side": "single", "document_number": 2,
+         "box_2d": [520, 0, 1000, 1000], "covered_by": []},
+    ]
+    passport, bill = build_segments([page], [{"regions": regions}], get_settings())
+    assert (passport.detected_type, bill.detected_type) == ("", "DEWA utility bill")
 
 
 def test_missing_national_id_is_rejected_for_an_individual(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -845,7 +886,10 @@ def _magdy_with(monkeypatch: pytest.MonkeyPatch, extra_name: str, extra_type: st
         monkeypatch,
         segments={
             "photo.png": [
-                _region("passport", 1, TOP_HALF),
+                # The passport on the left and the ID's two sides on the right, as in the real photo -
+                # never one on top of the other.
+                _region("passport", 1, [{"x": 0.05, "y": 0.05}, {"x": 0.55, "y": 0.05}, {"x": 0.55, "y": 0.45},
+                                        {"x": 0.05, "y": 0.45}]),
                 _region("national_id", 2, [{"x": 0.6, "y": 0.02}, {"x": 0.98, "y": 0.02}, {"x": 0.98, "y": 0.2}, {"x": 0.6, "y": 0.2}], "front"),
                 _region("national_id", 2, [{"x": 0.6, "y": 0.25}, {"x": 0.98, "y": 0.25}, {"x": 0.98, "y": 0.45}, {"x": 0.6, "y": 0.45}], "back"),
                 _region("visa", 3, BOTTOM_HALF),
@@ -1343,8 +1387,25 @@ def test_a_region_that_fell_back_to_the_whole_page_paints_nothing() -> None:
     assert covered == 0 and tuple(image[100, 100]) != COVER_FILL
 
 
-# --- an ID sent as two files is one entry; cross-check names for it; passport issuing location -----
+def test_another_document_in_the_margin_around_a_cut_out_is_painted_out() -> None:
+    import numpy as np
 
+    from app.services.detection import _build_detection
+    from app.services.type_detection.segmentation import COVER_FILL, _isolate, _Region
+
+    page = np.full((400, 600, 3), 90, dtype=np.uint8)
+    card = _Region(_build_detection(1, 1, "visa", 600, 400, [[20, 20], [300, 20], [300, 200], [20, 200]], "gemini_vision"),
+                   page, "visa", 1, "single", set())
+    # A neighbour starting 4 px right of the card: no overlap, but inside the cut-out's margin.
+    neighbour = _Region(_build_detection(1, 2, "passport", 600, 400, [[304, 20], [580, 20], [580, 200], [304, 200]],
+                                         "gemini_vision"), page, "passport", 2, "single", set())
+
+    image, covered = _isolate(card, [card, neighbour])
+    assert covered == 0
+    assert tuple(image[100, 310]) == COVER_FILL and tuple(image[100, 100]) != COVER_FILL
+
+
+# --- a card's front and back sent as two files are one entry, also when they fail ------------------
 
 def _one_card_two_files(monkeypatch: pytest.MonkeyPatch, extra: dict[str, list[dict[str, Any]]] | None = None,
                         answers: dict[str, dict[str, Any]] | None = None) -> None:
@@ -1413,6 +1474,8 @@ def test_a_valid_card_failed_by_the_cross_check_keeps_its_message(
     assert passport["status"] == "invalid"
 
 
+# --- passport issuing location: only ever from a passport ------------------------------------------
+
 def test_the_issuing_location_comes_only_from_a_passport() -> None:
     from app.services.ocr_pipeline import merge_extracted_data
 
@@ -1441,6 +1504,7 @@ def test_the_signatory_issuing_location_comes_only_from_a_passport() -> None:
 
     merged = merge_extracted_data([licence, passport], COMPANY_EXTRACTION_FIELDS)
     assert merged["Signatory_Passport_Issuing_Location"] == "Mumbai"
+
 
 
 @pytest.mark.parametrize("card_name", ["National ID", "national_id", "National ID 1 + National ID 2", "National ID 2"])
@@ -1480,3 +1544,103 @@ def test_a_conflict_naming_one_known_document_never_crashes() -> None:
     message = message_for("Passport", {"documents": ["Passport"], "detail": "date_of_birth", "message": ""},
                           {"Passport": "passport"})
     assert message == "'Passport' doesn't match the other documents. Please upload documents that match."
+
+
+# --- the split answer: malformed parts are skipped, and only a usable answer is cached -------------
+
+@pytest.mark.parametrize("page_result", [
+    {"regions": [{"document_type": "passport", "side": "single", "document_number": 1,
+                  "box_2d": [100, 100, 500, 700], "covered_by": 5}]},   # covered_by not a list
+    "not an object",
+    {"regions": "not a list"},
+    {"regions": [{"document_type": "passport", "box_2d": ["a", "b", "c", "d"]}]},
+])
+def test_a_malformed_split_answer_never_crashes(page_result: Any) -> None:
+    import numpy as np
+
+    from app.core.config import get_settings
+    from app.services.type_detection.segmentation import build_segments
+
+    page = np.full((1000, 800, 3), 255, np.uint8)
+    build_segments([page], [page_result], get_settings())
+
+
+def test_a_split_answer_that_cannot_be_used_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from app.core.config import get_settings
+    from app.services import result_cache
+    from app.services.type_detection import segmentation
+
+    stored: dict[Any, Any] = {}
+    monkeypatch.setattr(result_cache, "get", lambda key: stored.get(key))
+    monkeypatch.setattr(result_cache, "put", lambda key, value: stored.__setitem__(key, value))
+
+    class Model:
+        async def segment_documents(self, pages: list[bytes]) -> list[dict[str, Any]]:
+            return [{"regions": []}]
+
+    def broken(*args: Any) -> None:
+        raise ValueError("cannot cut out")
+
+    monkeypatch.setattr(segmentation, "build_segments", broken)
+    with pytest.raises(ValueError):
+        asyncio.run(segmentation.segment_file(content=_png("s.png"), mime_type="image/png", sha256="abc",
+                                              settings=get_settings(), gemini_service=Model()))
+    assert stored == {}
+
+
+
+# --- rental index (type-detection only): matched to the tenant's Ejari or tenancy contract by property --
+
+def test_a_rental_index_matches_a_tenancy_by_contract_plot_building_or_area() -> None:
+    from app.services.type_detection.tenants import same_property
+
+    ejari = {"Property_Area": "Al Barsha 1", "Property_Building": "Marina Heights", "Property_Plot_Number": "373-123",
+             "Property_Contract_Number": "0123456789"}
+    assert same_property({"Property_Contract_Number": "0123456789"}, ejari)
+    assert same_property({"Property_Plot_Number": "373123"}, ejari)
+    assert same_property({"Property_Building": "MARINA HEIGHTS"}, ejari)
+    assert same_property({"Property_Area": "Al Barsha First"}, ejari)        # an ordinal reads as its number
+    assert not same_property({"Property_Area": "Jumeirah Village Circle"}, ejari)
+    assert not same_property({}, ejari)
+
+
+def _rental_index_request(monkeypatch: pytest.MonkeyPatch, index_area: str) -> Any:
+    _stub(
+        monkeypatch,
+        segments={"eid.png": [_region("national_id", 1)], "ejari.png": [_region("ejari_certificate", 1)],
+                  "ri.png": [_region("rental_index", 1)]},
+        answers={
+            "eid.png": _raw(["national_id"], National_Id="784-1985-1234567-1", **AHMED),
+            "ejari.png": _raw(["ejari_certificate"], fields=[], National_Id="784-1985-1234567-1",
+                              Tenant_Name_En="Ahmed Khan", Property_Area="Al Barsha 1"),
+            "ri.png": _raw(["rental_index"], fields=[], Property_Area=index_area),
+        },
+    )
+
+
+def test_a_rental_index_for_the_tenants_property_is_accepted(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _rental_index_request(monkeypatch, "AL BARSHA 1")
+
+    body = _upload(client, ["eid.png", "ejari.png", "ri.png"]).json()
+
+    assert body["status"] == "success"
+    index = body["documents"][-1]
+    assert (index["document_type"], index["status"], index["tenant_ids"]) == ("rental_index", "valid", ["tenant_1"])
+    assert "property_area" not in body["form_data"][0]                       # property details are never returned
+
+
+def test_a_rental_index_for_another_property_gets_its_own_error(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _rental_index_request(monkeypatch, "Dubai Marina")
+
+    body = _upload(client, ["eid.png", "ejari.png", "ri.png"]).json()
+
+    assert body["status"] == "failed"
+    assert body["form_data"][0]["status"] == "success"                       # the tenant is still extracted
+    index = body["documents"][-1]
+    assert (index["status"], index["tenant_ids"]) == ("invalid", [])
+    assert index["error"] == (
+        "'Rental index' doesn't match the property on the tenant's Ejari certificate or tenancy contract. "
+        "Please upload the matching Ejari certificate or tenancy contract, or remove it."
+    )

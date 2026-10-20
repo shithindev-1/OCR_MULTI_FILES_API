@@ -28,6 +28,7 @@ from app.services.ocr_pipeline import (
 from app.services.post_processing import document_label
 from app.services.type_detection.tenants import (
     LICENCE_TYPES,
+    RENTAL_INDEX_TYPE,
     Tenant,
     Unit,
     group_companies,
@@ -58,6 +59,12 @@ def _unmatched_message(unit: Unit, name: str, company: bool, *, several: bool) -
     label, e.g. "Ejari certificate 2") says which document; the fix names its plain type."""
     whom = "any tenant in this request" if several else "the tenant"
     kind = document_label(unit.document_type)
+    if unit.document_type == RENTAL_INDEX_TYPE:
+        if has_link_details(unit, company):
+            owner = "any tenant's" if several else ("the company's" if company else "the tenant's")
+            return (f"'{name}' doesn't match the property on {owner} Ejari certificate or tenancy contract. "
+                    "Please upload the matching Ejari certificate or tenancy contract, or remove it.")
+        return f"We couldn't read the property on '{name}'. Please upload a clearer copy."
     if company:
         if has_link_details(unit, company):
             return (f"'{name}' is not for the company on the trade licence or initial approval. "
@@ -209,7 +216,8 @@ async def finish_per_tenant(
         return sorted(documents, key=lambda document: _VALUE_PRIORITY.get(document["document_type"], len(_VALUE_PRIORITY)))
 
     async def cross_check(tenant: Tenant) -> None:
-        documents = own_documents(tenant)
+        # A rental index describes a property, not a person: there is nothing on it to compare.
+        documents = [document for document in own_documents(tenant) if document["document_type"] != RENTAL_INDEX_TYPE]
         if has_errors(tenant) or len(documents) < 2 or not settings.validation_enabled:
             return
         try:

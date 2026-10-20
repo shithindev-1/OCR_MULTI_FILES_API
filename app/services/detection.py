@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass, replace
 from io import BytesIO
@@ -23,6 +24,9 @@ rotation_logger = logging.getLogger("uae_ocr.rotation")
 
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 _MIN_VALID_AREA_RATIO = 0.05
+# Largest corner value still read as a fraction: the model is asked to place an uncertain corner
+# slightly outside the edge, so 1.002 is a fraction just past the edge, not the 0-1000 scale.
+_MAX_FRACTION = 1.5
 # Share of BOTH boxes two regions on one page must overlap by to count as the same document.
 _DUPLICATE_OVERLAP_RATIO = 0.8
 _DETECTION_MAX_DIMENSION = 1024
@@ -93,7 +97,18 @@ def _load_image(content: bytes) -> np.ndarray:
         return cv2.cvtColor(np.array(rgb), cv2.COLOR_RGB2BGR)
 
 
+# PDFium is not thread-safe, and PDFs are rendered in worker threads - several files of one request
+# at once. Two renders at the same time crashed with "access violation" and every file of the request
+# failed as unreadable, so all PDFium work runs one document at a time.
+_PDFIUM_LOCK = threading.Lock()
+
+
 def _render_pdf_pages(content: bytes, dpi: int) -> list[np.ndarray]:
+    with _PDFIUM_LOCK:
+        return _render_pdf_pages_locked(content, dpi)
+
+
+def _render_pdf_pages_locked(content: bytes, dpi: int) -> list[np.ndarray]:
     pdf = pdfium.PdfDocument(content)
     try:
         scale = dpi / 72
@@ -149,6 +164,50 @@ def _polygon_area(points: list[list[float]]) -> float:
     return abs(area) / 2
 
 
+def _axis_scale(values: list[float]) -> float | None:
+    """`_corner_scale` for one axis: the model has answered x as fractions and y on 0-1000 in one reply."""
+    largest = max(values)
+    if largest <= _MAX_FRACTION:
+        return 1.0
+    if largest <= 1000.0:
+        return 1000.0
+    return None
+
+
+def _card_box(corners: list[Any], width: int, height: int) -> list[list[int]] | None:
+    """The box of the one card on a merged National ID page (its front and back sent as two files): the
+    rectangle around the answered corners, each axis read on its own scale. The model has answered these
+    with x and y on different scales, in a crossed order, or with one corner far off - any of which made
+    the outline collapse and the page be taken whole. The rectangle holds the whole card; the edge
+    refinement then snaps it onto the card's real, possibly tilted, edges."""
+    try:
+        xs = [float(corner["x"]) for corner in corners]
+        ys = [float(corner["y"]) for corner in corners]
+    except (KeyError, TypeError, ValueError):
+        return None
+    x_scale, y_scale = _axis_scale(xs), _axis_scale(ys)
+    if x_scale is None or y_scale is None:
+        return None
+    left, right = (min(max(round(value / x_scale * width), 0), width) for value in (min(xs), max(xs)))
+    top, bottom = (min(max(round(value / y_scale * height), 0), height) for value in (min(ys), max(ys)))
+    return [[left, top], [right, top], [right, bottom], [left, bottom]]
+
+
+def _corner_scale(corners: list[Any]) -> float | None:
+    """The scale a corner answer is on: 1 for the fractions the prompt asks for, 1000 when the model
+    answers on its own 0-1000 scale instead (it switches between the two from one call to the next).
+    Anything larger is a pixel answer on an unknown image size - None, so the full frame is used.
+    Read from the largest value: a real document box always reaches well past 1 on a 0-1000 scale,
+    while a fraction may run a little past 1 for a corner placed just outside the image edge."""
+    values = [float(corner[axis]) for corner in corners for axis in ("x", "y")]
+    largest = max(values)
+    if largest <= _MAX_FRACTION:
+        return 1.0
+    if largest <= 1000.0:
+        return 1000.0
+    return None
+
+
 def _detection_from_corners(
     *,
     page_number: int,
@@ -159,13 +218,22 @@ def _detection_from_corners(
     corners: Any,
     found: bool,
     min_area_ratio: float = _MIN_VALID_AREA_RATIO,
+    order_corners: bool = False,
 ) -> PageDetection:
     box: list[list[int]] | None = None
-    if found and isinstance(corners, list) and len(corners) == 4:
+    if order_corners:
+        card = _card_box(corners, width, height) if found and isinstance(corners, list) and len(corners) == 4 else None
+        if card is not None and _polygon_area(card) >= width * height * min_area_ratio:
+            box = card
+    scale = (
+        _corner_scale(corners) if not order_corners and found and isinstance(corners, list) and len(corners) == 4
+        else None
+    )
+    if scale is not None:
         pixel_corners = [
             [
-                min(max(round(float(corner["x"]) * width), 0), width),
-                min(max(round(float(corner["y"]) * height), 0), height),
+                min(max(round(float(corner["x"]) / scale * width), 0), width),
+                min(max(round(float(corner["y"]) / scale * height), 0), height),
             ]
             for corner in corners
         ]
@@ -424,9 +492,11 @@ def page_detections(
     page_result: dict[str, Any],
     drop_duplicates: bool = True,
     min_area_ratio: float = _MIN_VALID_AREA_RATIO,
+    order_corners: bool = False,
 ) -> list[PageDetection]:
     """`min_area_ratio`: the smallest share of the page a box may cover before it is taken as a broken
-    answer. The split step passes a far smaller value - one ID card on an A4 scan is under 4% of it."""
+    answer. The split step passes a far smaller value - one ID card on an A4 scan is under 4% of it.
+    `order_corners`: a National ID's merged front/back - each page's box is read with `_card_box`."""
     # One page/frame can hold several separate physical documents (a card's front and back
     # photographed side by side, say), so each entry Gemini reports becomes its own detection —
     # and its own crop — rather than being merged into a single box covering both.
@@ -448,6 +518,7 @@ def page_detections(
                     corners=document.get("corners"),
                     found=True,
                     min_area_ratio=min_area_ratio,
+                    order_corners=order_corners,
                 )
             )
 
@@ -796,12 +867,14 @@ async def run_detection(
     settings: Settings,
     gemini_service: DocumentVision,
     box_detection: bool = True,
+    merged_national_id: bool = False,
 ) -> list[Path] | None:
     """Crops, rotates and enhances every document in a file and saves the results.
 
     `box_detection=False` is for a file that already holds exactly one document cut to its own edges
     (a type-detection cut-out): each page is taken whole, so no second detection call is made and
-    nothing next to the document can be picked up again - only orientation and enhancement run."""
+    nothing next to the document can be picked up again - only orientation and enhancement run.
+    `merged_national_id`: a National ID's front and back sent as two files and merged - see `_card_box`."""
     # Rendering/encoding/cropping/saving are CPU-bound and offloaded to worker threads so they
     # never block the event loop; the Gemini call in between is awaited natively so it runs
     # concurrently with the main extraction call in app/services/ocr_pipeline.py, not serially after it.
@@ -813,13 +886,13 @@ async def run_detection(
             await gemini_service.detect_box_corners(encoded_pages) if box_detection
             else [{"found": False, "documents": []} for _ in images]
         )
-        pairs = [
-            (detection, image)
-            for index, image in enumerate(images)
-            for detection in page_detections(
-                page_number=index + 1, width=image.shape[1], height=image.shape[0], page_result=page_results[index]
+        pairs = []
+        for index, image in enumerate(images):
+            detections = page_detections(
+                page_number=index + 1, width=image.shape[1], height=image.shape[0], page_result=page_results[index],
+                order_corners=merged_national_id,
             )
-        ]
+            pairs.extend((detection, image) for detection in detections)
         # Gemini says where the documents are; OpenCV snaps those regions onto the real edges so
         # the perspective warp deskews properly instead of introducing a shear of its own.
         pairs = await asyncio.to_thread(_refine_pairs, pairs)

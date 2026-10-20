@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.schemas.ocr import (
     DATA_FIELDS,
+    DETECT_DOCUMENT_TYPES,
     DOCUMENT_TYPE_ALIASES,
     FRONT_BACK_TYPES,
     MISSING_INFO_FIELDS,
@@ -62,7 +63,7 @@ def _parse_types(raw_value: str) -> list[str]:
     for token in (raw_value or "").replace(";", ",").split(","):
         name = token.strip().strip(".").lower().replace(" ", "_").replace("-", "_")
         name = _TYPE_ALIASES.get(name, name)
-        if name in VERIFIABLE_TYPES or name == "other":
+        if name in DETECT_DOCUMENT_TYPES or name == "other":
             if name not in types:
                 types.append(name)
     return types
@@ -131,6 +132,7 @@ _DOCUMENT_LABELS = {
     "tenant_form": "tenant form",
     "bank_statement": "bank statement",
     "salary_certificate": "salary certificate",
+    "rental_index": "rental index",
 }
 
 
