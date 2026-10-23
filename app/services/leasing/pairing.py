@@ -9,7 +9,7 @@ from typing import Any
 from app.core.config import settings
 from app.core.exceptions import ValidationStopped
 from app.services.concurrency import run_concurrently
-from app.services.gemini import get_gemini_service
+from app.services.gemini import charged_to, documents_named, get_gemini_service
 from app.services.leasing.reports import first_error_message, indices_named
 from app.services.ocr_pipeline import (
     VerificationUnavailable,
@@ -58,6 +58,8 @@ async def match_sides(group: list[dict[str, Any]], *, request_id: str) -> list[l
 
     if fronts and backs:
         if settings.validation_enabled:
+            @charged_to(lambda front, back: documents_named(front["document_name"], front["document_type"])
+                        + documents_named(back["document_name"], back["document_type"]))
             async def confirm(front: dict[str, Any], back: dict[str, Any]) -> bool:
                 try:
                     return await call_with_one_retry(

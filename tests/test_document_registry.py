@@ -213,3 +213,35 @@ def test_page_numbering_is_never_a_problem_on_the_detect_self_check() -> None:
     # A 7-page bank statement printing "Page 1 of 1" on its pages was rejected for its page count.
     assert "never report anything about page numbers, page counts" in prompts.SHORT_SELF_MESSAGES
     assert "PAGES - never report" not in prompts.SELF_VERIFICATION_PROMPT
+
+
+
+# --- document-usage.log: tokens per document, adding up to the request's total -----------------------
+
+def test_tokens_are_charged_per_document_and_add_up_to_the_request() -> None:
+    from app.services.gemini import usage
+
+    usage.start_usage_tracking()
+    with usage.usage_for(("file scan.pdf #1", "")):
+        usage.record_usage(usage.CALL_SEGMENTATION, 900, 90)          # one split call for the file
+    usage.share_usage("file scan.pdf #1", [("Passport", "passport"), ("Visa", "visa"), ("Bill (not listed)", "other")])
+    with usage.usage_for(*usage.documents_named("Passport", "passport")):
+        usage.record_usage(usage.CALL_EXTRACTION, 3000, 200)
+    with usage.usage_for(*usage.documents_named("National ID 1 + National ID 2", "national_id")):
+        usage.record_usage(usage.CALL_VALIDATION, 2000, 100)           # a merged front/back pair
+    with usage.usage_for(("Passport", "passport"), ("Visa", "visa")):
+        usage.record_usage(usage.CALL_VALIDATION, 1000, 50)            # a cross-check of two documents
+    usage.record_usage(usage.CALL_ROTATION, 10, 1)                     # made for no document
+
+    rows = {row["document"]: row for row in usage.document_usage()}
+
+    assert rows["Passport"]["document_type"] == "passport"
+    assert rows["Passport"]["extraction"] == {"calls": 1, "input_tokens": 3000, "output_tokens": 200}
+    assert rows["Passport"]["segmentation"] == {"calls": 1, "input_tokens": 300, "output_tokens": 30}
+    assert rows["Passport"]["validation"]["input_tokens"] == 500
+    assert rows["National ID 1"]["validation"]["input_tokens"] == 1000 == rows["National ID 2"]["validation"]["input_tokens"]
+    assert rows["Bill (not listed)"]["document_type"] == "other"
+    assert rows["unassigned"]["rotation"]["calls"] == 1
+    total = usage.usage_summary()["request_total"]
+    assert sum(row["document_total"]["input_tokens"] for row in rows.values()) == total["input_tokens"]
+    assert sum(row["document_total"]["output_tokens"] for row in rows.values()) == total["output_tokens"]

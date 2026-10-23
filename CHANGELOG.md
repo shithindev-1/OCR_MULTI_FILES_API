@@ -5,6 +5,13 @@ major version means a change that existing callers must adapt to.
 
 ## Unreleased
 
+### Added (logs only - responses and existing logs unchanged)
+- **`logs/document-usage.log`**: one JSON line per document per request, with its `document_type` and its tokens
+  per call type (`segmentation`, `extraction`, `validation`, `crop`, `rotation`) and `document_total`, so the cost of
+  each document type can be estimated. A call made for one document is charged to it; a file's split call, a
+  cross-check or a front/back check is shared equally among the documents involved, so a request's lines add up
+  to its `usage.log` line (within rounding). All endpoints.
+
 ### Added (type-detection endpoints - tell the .NET team)
 - **Rental index** (Dubai Land Department / RERA rental index result) is a supported document type:
   `document_type: "rental_index"`, checked, cropped (`Tenant_1_Rental_Index.pdf`). It adds no form_data keys. It

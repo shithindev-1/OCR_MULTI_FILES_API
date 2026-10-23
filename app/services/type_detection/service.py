@@ -16,7 +16,7 @@ from app.core.config import settings
 from app.schemas.leasing import SourceDocument
 from app.services import blob_storage
 from app.services.concurrency import run_concurrently
-from app.services.gemini import get_gemini_service, start_usage_tracking
+from app.services.gemini import get_gemini_service, share_usage, start_usage_tracking, usage_for
 from app.services.leasing import sources as source_fetch
 from app.services.leasing.batch import process_batch
 from app.services.leasing.rules import require_mandatory_document
@@ -30,6 +30,11 @@ from app.services.validation import ALLOWED_FILES, validate_document_request
 
 def _file_name(item: dict[str, Any]) -> str:
     return item.get("filename") or posixpath.basename(urlparse(item["source"]).path) or item["source"]
+
+
+def _file_usage_name(item: dict[str, Any]) -> str:
+    """The name a file's split call is charged under until its documents are known."""
+    return f"file {_file_name(item)} #{id(item)}"
 
 
 async def _segment_one(item: dict[str, Any], request_id: str) -> None:
@@ -48,13 +53,15 @@ async def _segment_one(item: dict[str, Any], request_id: str) -> None:
         return
     item["mime_type"] = validated.mime_type
     try:
-        item["segments"] = await call_with_one_retry(
-            lambda: segment_file(
-                content=item["content"], mime_type=validated.mime_type, sha256=validated.sha256,
-                settings=settings, gemini_service=get_gemini_service(),
-            ),
-            what="Segmentation", request_id=request_id,
-        )
+        # Charged to the file until its documents are known - then shared among them (process_detected).
+        with usage_for((_file_usage_name(item), "")):
+            item["segments"] = await call_with_one_retry(
+                lambda: segment_file(
+                    content=item["content"], mime_type=validated.mime_type, sha256=validated.sha256,
+                    settings=settings, gemini_service=get_gemini_service(),
+                ),
+                what="Segmentation", request_id=request_id,
+            )
     except VerificationUnavailable:
         item["error"] = (
             f"We could not read '{_file_name(item)}' right now. Please try again in a few minutes."
@@ -213,6 +220,15 @@ async def process_detected(
         )
         for item, segment in found if segment.document_type == OTHER_TYPE
     ]
+
+    # A file's split call is shared among the documents found in it (document-usage.log).
+    found_labels = dict(zip(map(id, (segment for _, segment in supported)), _labels(supported)))
+    for item in items:
+        share_usage(_file_usage_name(item), [
+            (found_labels[id(segment)], segment.document_type) if id(segment) in found_labels
+            else (f"{segment.detected_type or 'Other document'} (not listed)", segment.document_type)
+            for segment in item.get("segments") or []
+        ])
 
     # Same rule and message as the normal endpoints, judged on the types that were found. Each
     # tenant's own mandatory document is checked once the documents are grouped into tenants.

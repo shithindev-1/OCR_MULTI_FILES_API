@@ -128,6 +128,15 @@ def configure_logging(settings: Settings) -> None:
         logging.Formatter("%(message)s"),
         propagate=False,
     )
+    # One JSON object per line: one request's tokens per document (with its document type), so the
+    # cost of each document type can be estimated. Sums to the request's line in usage.log.
+    _configure_file_logger(
+        "uae_ocr.document_usage",
+        log_directory / "document-usage.log",
+        settings,
+        logging.Formatter("%(message)s"),
+        propagate=False,
+    )
     # One JSON object per line: the rotation Gemini asked for and what OpenCV actually applied,
     # per cropped document, so bad rotations can be audited without re-running anything.
     _configure_file_logger(

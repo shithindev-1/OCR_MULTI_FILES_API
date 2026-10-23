@@ -43,9 +43,14 @@ from app.services.gemini.usage import (
     CALL_SEGMENTATION,
     CALL_VALIDATION,
     CROP_ROTATE_CALLS,
+    charged_to,
+    document_usage,
+    documents_named,
     log_usage_summary,
     record_usage,
+    share_usage,
     start_usage_tracking,
+    usage_for,
     usage_summary,
 )
 
@@ -87,4 +92,9 @@ __all__ = [
     "record_usage",
     "usage_summary",
     "log_usage_summary",
+    "usage_for",
+    "charged_to",
+    "documents_named",
+    "share_usage",
+    "document_usage",
 ]

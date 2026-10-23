@@ -26,7 +26,7 @@ from app.services.blob_storage import BlobStorageError
 from app.services.concurrency import run_concurrently
 from app.services.detection import run_detection, save_merged_document
 from app.services.form_normalization import normalize_form_data
-from app.services.gemini import get_gemini_service, start_usage_tracking
+from app.services.gemini import charged_to, documents_named, get_gemini_service, start_usage_tracking
 from app.services.leasing.outputs import (
     document_folder,
     merged_folder,
@@ -266,6 +266,7 @@ async def process_batch(
 
     # Crops, rotates and uploads one passed document's result - used once the request (or, when
     # types were detected, its tenant) has passed.
+    @charged_to(lambda document: documents_named(document["document_name"], document["document_type"]))
     async def crop_and_upload(document: dict[str, Any]) -> bool:
         is_merged = bool(document.get("is_merged_pair"))
         upload_indices = merged_indices(document, index_by_name)

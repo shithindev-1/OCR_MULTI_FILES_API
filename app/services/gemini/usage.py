@@ -1,7 +1,10 @@
 """Per-request token accounting across every Gemini call, written to usage.log."""
 
+import functools
 import json
 import logging
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
@@ -13,6 +16,14 @@ from app.core.logging import log_timestamps
 # because the service is a process-wide singleton while these totals belong to one request; each
 # request runs in its own task, so each gets its own copy.
 _usage_records: ContextVar[list[dict[str, Any]] | None] = ContextVar("ocr_usage", default=None)
+
+# Which document(s) - (name, document type) - the model call being made is for, so document-usage.log
+# can say what each document type costs. Set around the work done for a document; a call made for
+# several (a file's split, a cross-check) is shared among them equally.
+_usage_for: ContextVar[tuple[tuple[str, str], ...]] = ContextVar("ocr_usage_for", default=())
+# Names that stand for several documents - a file whose split call ran before its documents were
+# known - and the documents they turned out to hold. One dict per request.
+_usage_groups: ContextVar[dict[str, list[tuple[str, str]]] | None] = ContextVar("ocr_usage_groups", default=None)
 
 
 # The calls a request can make, named for what they are for rather than for the method that makes
@@ -45,6 +56,42 @@ CROP_ROTATE_CALLS = (CALL_CROP, CALL_ROTATION)
 def start_usage_tracking() -> None:
     """Begin a fresh per-request tally. Call once, at the start of a request."""
     _usage_records.set([])
+    _usage_groups.set({})
+
+
+def documents_named(name: Any, document_type: Any) -> list[tuple[str, str]]:
+    """The documents a pipeline document stands for: a merged front/back pair is named
+    "<front> + <back>" and counts for both sides."""
+    return [(part.strip(), str(document_type or "")) for part in str(name or "document").split(" + ")]
+
+
+@contextmanager
+def usage_for(*documents: tuple[str, str]) -> Iterator[None]:
+    """Charges the model calls made inside this block to `documents`."""
+    token = _usage_for.set(tuple(documents))
+    try:
+        yield
+    finally:
+        _usage_for.reset(token)
+
+
+def charged_to(documents_of: Callable[..., Iterable[tuple[str, str]]]) -> Callable[..., Any]:
+    """Decorator for an async function: its model calls are charged to `documents_of(*args, **kwargs)`."""
+    def wrap(function: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(function)
+        async def run(*args: Any, **kwargs: Any) -> Any:
+            with usage_for(*documents_of(*args, **kwargs)):
+                return await function(*args, **kwargs)
+        return run
+    return wrap
+
+
+def share_usage(name: str, documents: list[tuple[str, str]]) -> None:
+    """Calls charged to `name` (a file's split, made before its documents were known) are shared
+    among `documents`."""
+    groups = _usage_groups.get()
+    if groups is not None:
+        groups[name] = list(documents)
 
 
 def record_usage(call: str, input_tokens: Any, output_tokens: Any) -> None:
@@ -55,6 +102,7 @@ def record_usage(call: str, input_tokens: Any, output_tokens: Any) -> None:
         "call": call,
         "input_tokens": int(input_tokens) if isinstance(input_tokens, int) else 0,
         "output_tokens": int(output_tokens) if isinstance(output_tokens, int) else 0,
+        "for": _usage_for.get(),
     })
 
 
@@ -99,7 +147,61 @@ def log_usage_summary(request_id: str, status: str, detection_enabled: bool) -> 
         "detection_enabled": detection_enabled,
         **summary,
     }))
+    _log_document_usage(request_id, status)
     return summary
 
 
+_CALLS = (CALL_SEGMENTATION, CALL_EXTRACTION, CALL_VALIDATION, CALL_CROP, CALL_ROTATION)
+
+
+def document_usage() -> list[dict[str, Any]]:
+    """This request's tokens per document. A call made for one document is charged to it whole; a
+    call made for several (a file's split, a cross-check, a front/back check) is shared among them
+    equally, so every document's tokens add up to the request's total. `calls` counts every call a
+    document took part in, shared or not. A call made for no document is charged to "unassigned"."""
+    groups = _usage_groups.get() or {}
+    usage: dict[tuple[str, str], dict[str, list[float]]] = {}
+    for record in _usage_records.get() or []:
+        owners: list[tuple[str, str]] = []
+        for name, document_type in record.get("for") or ():
+            for owner in groups.get(name) or [(name, document_type)]:
+                if owner not in owners:
+                    owners.append(owner)
+        owners = owners or [("unassigned", "unassigned")]
+        for owner in owners:
+            row = usage.setdefault(owner, {call: [0, 0.0, 0.0] for call in _CALLS})
+            totals = row.setdefault(record["call"], [0, 0.0, 0.0])
+            totals[0] += 1
+            totals[1] += record["input_tokens"] / len(owners)
+            totals[2] += record["output_tokens"] / len(owners)
+    documents = []
+    for (name, document_type), row in usage.items():
+        calls = {
+            call: {"calls": totals[0], "input_tokens": round(totals[1]), "output_tokens": round(totals[2])}
+            for call, totals in row.items()
+        }
+        input_tokens = sum(entry["input_tokens"] for entry in calls.values())
+        output_tokens = sum(entry["output_tokens"] for entry in calls.values())
+        documents.append({
+            "document": name,
+            "document_type": document_type or "unknown",
+            **calls,
+            "document_total": {
+                "calls": sum(entry["calls"] for entry in calls.values()),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+            },
+        })
+    return documents
+
+
+def _log_document_usage(request_id: str, status: str) -> None:
+    """Writes this request's tokens per document to document-usage.log, one JSON object per document."""
+    stamps = log_timestamps()
+    for document in document_usage():
+        document_usage_logger.info(json.dumps({**stamps, "request_id": request_id, "status": status, **document}))
+
+
 usage_logger = logging.getLogger("uae_ocr.usage")
+document_usage_logger = logging.getLogger("uae_ocr.document_usage")

@@ -34,8 +34,11 @@ from app.services import document_registry, result_cache
 from app.services.detection import run_detection, save_merged_document
 from app.services.gemini import (
     GeminiServiceError,
+    charged_to,
+    documents_named,
     get_gemini_service,
     log_usage_summary,
+    usage_for,
 )
 from app.services.post_processing import (
     ambiguous_pair_response,
@@ -81,6 +84,8 @@ async def call_with_one_retry(call: Any, *, what: str, request_id: str) -> Any:
         raise VerificationUnavailable(what) from exc
 
 
+@charged_to(lambda **kw: [d for document in kw["documents"]
+                 for d in documents_named(document["document_name"], document["document_type"])])
 async def verify_documents_across(
     *, request_id: str, documents: list[dict[str, Any]], tenant_type: str | None = None,
     short_messages: bool = False,
@@ -239,6 +244,7 @@ async def _fill_from_general_reading(data: dict[str, Any], **reading: Any) -> di
     return {field: general_data[field] if field in filled else value for field, value in data.items()}
 
 
+@charged_to(lambda **kw: documents_named(kw["document_name"], kw["document_type"]))
 async def extract_and_type_check(
     *,
     request_id: str,
@@ -428,6 +434,8 @@ def _build_merged_pdf(first_content: bytes, first_mime: str, second_content: byt
     return output.getvalue()
 
 
+@charged_to(lambda **kw: documents_named(kw["front"]["document_name"], kw["document_type"])
+    + documents_named(kw["back"]["document_name"], kw["document_type"]))
 async def _merge_front_back(
     *,
     request_id: str,
@@ -590,6 +598,7 @@ async def resolve_incomplete_pairs(
     return resolved
 
 
+@charged_to(lambda **kw: documents_named(kw["document"]["document_name"], kw["document"]["document_type"]))
 async def run_self_verification(
     *,
     request_id: str,
@@ -750,27 +759,28 @@ async def run_ocr_batch(
     # for nothing.
     if detection_enabled:
         for document in extracted:
-            saved_paths = await run_detection(
-                content=document["content"],
-                filename=document["filename"],
-                mime_type=document["mime_type"],
-                document_type=document["document_type"],
-                sha256=document["sha256"],
-                settings=settings,
-                gemini_service=get_gemini_service(),
-            )
-            if document.get("is_merged_pair") and saved_paths:
-                # The crop pipeline above already produced one clean, upright PNG per side of this
-                # merged document; stitch those into the one combined file the person who uploaded
-                # the two separate sides actually wants to download, next to the crop output on
-                # disk, found by its `_merged.pdf` suffix.
-                await asyncio.to_thread(
-                    save_merged_document,
-                    saved_paths,
-                    output_dir=Path(settings.detection_output_dir),
+            with usage_for(*documents_named(document["document_name"], document["document_type"])):
+                saved_paths = await run_detection(
+                    content=document["content"],
                     filename=document["filename"],
+                    mime_type=document["mime_type"],
+                    document_type=document["document_type"],
                     sha256=document["sha256"],
+                    settings=settings,
+                    gemini_service=get_gemini_service(),
                 )
+                if document.get("is_merged_pair") and saved_paths:
+                    # The crop pipeline above already produced one clean, upright PNG per side of this
+                    # merged document; stitch those into the one combined file the person who uploaded
+                    # the two separate sides actually wants to download, next to the crop output on
+                    # disk, found by its `_merged.pdf` suffix.
+                    await asyncio.to_thread(
+                        save_merged_document,
+                        saved_paths,
+                        output_dir=Path(settings.detection_output_dir),
+                        filename=document["filename"],
+                        sha256=document["sha256"],
+                    )
     else:
         logger.info(
             "Detection pipeline skipped request_id=%s reason=disabled (extraction only) documents=%d",
