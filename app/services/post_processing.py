@@ -14,6 +14,7 @@ from app.schemas.ocr import (
     VERIFIABLE_TYPES,
     ErrorInfo,
     OcrResponse,
+    same_document_type,
 )
 
 _FIELD_LOOKUP = {field.lower(): field for field in DATA_FIELDS}
@@ -126,6 +127,7 @@ def parse_extraction_text(text: str, fields: list[str] | None = None) -> dict[st
 _DOCUMENT_LABELS = {
     "national_id": "National ID",
     "trade_license": "trade licence",
+    "commercial_license": "commercial licence",
     "ejari_certificate": "Ejari certificate",
     "initial_approval": "initial approval certificate",
     "tenancy_contract": "tenancy contract",
@@ -171,7 +173,7 @@ def document_type_matches(document_type: str, types_present: Any) -> bool:
         return True
     if not isinstance(types_present, list) or not types_present:
         return True
-    return document_type in types_present
+    return any(same_document_type(document_type, reported) for reported in types_present)
 
 
 def _incomplete_error(document_name: str, filename: str, document_type: str) -> dict[str, str]:

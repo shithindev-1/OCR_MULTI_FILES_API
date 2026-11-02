@@ -7,8 +7,8 @@ from fastapi import HTTPException
 
 from app.schemas.ocr import (
     COMPANY_ALTERNATIVE_DOCUMENT_TYPE,
-    COMPANY_REQUIRED_DOCUMENT_TYPE,
     INDIVIDUAL_REQUIRED_DOCUMENT_TYPE,
+    TRADE_LICENCE_TYPES,
     canonical_document_type,
     is_company,
 )
@@ -74,19 +74,19 @@ def require_mandatory_document(
         for value in document_types
     }
     if is_company(tenant_type) and accept_initial_approval:
-        # Type-detection endpoints: a trade licence or an initial approval.
-        if not declared & {COMPANY_REQUIRED_DOCUMENT_TYPE, COMPANY_ALTERNATIVE_DOCUMENT_TYPE}:
+        # Type-detection endpoints: a trade licence, a commercial licence or an initial approval.
+        if not declared & (TRADE_LICENCE_TYPES | {COMPANY_ALTERNATIVE_DOCUMENT_TYPE}):
             raise HTTPException(
                 status_code=400,
-                detail="A trade licence or initial approval is required for a company. Please upload the "
-                       "company's trade licence or initial approval and try again.",
+                detail="A trade licence, commercial licence or initial approval is required for a company. Please "
+                       "upload the company's trade licence, commercial licence or initial approval and try again.",
             )
     elif is_company(tenant_type):
-        if COMPANY_REQUIRED_DOCUMENT_TYPE not in declared:
+        if not declared & TRADE_LICENCE_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail="A trade licence is required for a company. Please upload the company's trade licence "
-                       "and try again.",
+                detail="A trade licence or commercial licence is required for a company. Please upload the "
+                       "company's trade licence or commercial licence and try again.",
             )
     elif INDIVIDUAL_REQUIRED_DOCUMENT_TYPE not in declared:
         raise HTTPException(

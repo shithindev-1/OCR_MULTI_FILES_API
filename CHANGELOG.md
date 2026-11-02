@@ -5,6 +5,15 @@ major version means a change that existing callers must adapt to.
 
 ## Unreleased
 
+### Added (all endpoints - tell the .NET team)
+- **Commercial licence** (`document_type: "commercial_license"`): a licence whose printed title is Commercial
+  License. For a company it satisfies the mandatory-document rule like a trade licence (old endpoints: trade licence
+  or commercial licence; detect: trade licence, commercial licence or initial approval). It is read, grouped and
+  checked exactly like a trade licence and fills the same `trade_license_*` keys; processed file
+  `Tenant_1_Commercial_Licence.pdf`. A trade licence and a commercial licence count as each other in every type
+  check, so a commercial licence sent as `trade_license` (as today) is still accepted. Messages naming the company's
+  licence now say "trade licence, commercial licence or initial approval".
+
 ### Added (logs only - responses and existing logs unchanged)
 - **`logs/document-usage.log`**: one JSON line per document per request, with its `document_type` and its tokens
   per call type (`segmentation`, `extraction`, `validation`, `crop`, `rotation`) and `document_total`, so the cost of

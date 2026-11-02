@@ -20,6 +20,7 @@ from app.schemas.leasing import LeasingOcrRequest, SourceDocument
 from app.schemas.ocr import (
     fields_for_tenant_type,
     is_company,
+    same_document_type,
 )
 from app.services import blob_storage, progress
 from app.services.blob_storage import BlobStorageError
@@ -201,7 +202,9 @@ async def process_batch(
             report["error"] = first_error_message(stopped.response)
             return None, False
 
-        if detected_types and validated.document_type not in candidate["types_present"]:
+        if detected_types and not any(
+            same_document_type(validated.document_type, reported) for reported in candidate["types_present"]
+        ):
             report["error"] = unconfirmed_type_error(
                 item["document_name"], validated.document_type, candidate["types_present"],
             )

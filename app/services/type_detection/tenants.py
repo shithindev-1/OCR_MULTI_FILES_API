@@ -38,9 +38,11 @@ from app.services.names import name_tokens, same_name
 
 PERSON_TYPES = frozenset({"national_id", "passport", "visa"})
 COMPANY_TYPE = "trade_license"
+# A trade licence under either name: anchors a company first; a commercial licence is one.
+_TRADE_LICENCES = frozenset({"trade_license", "commercial_license"})
 # Documents that describe a company and list its people. For an individual they are matched on that
 # list, never on the tenant fields.
-LICENCE_TYPES = frozenset({"trade_license", "initial_approval"})
+LICENCE_TYPES = frozenset({"trade_license", "commercial_license", "initial_approval"})
 
 _MEMBER = re.compile(r"^\s*(?P<name>[^()]+?)\s*(?:\([^()]*\))?\s*$")
 RENTAL_INDEX_TYPE = "rental_index"
@@ -256,7 +258,7 @@ def group_companies(units: list[Unit]) -> Grouping:
     # Licences first, so an initial approval of the same company joins the licence's company.
     anchors = sorted(
         (unit for unit in units if unit.document_type in LICENCE_TYPES),
-        key=lambda unit: unit.document_type != COMPANY_TYPE,
+        key=lambda unit: unit.document_type not in _TRADE_LICENCES,
     )
     companies: list[list[Unit]] = []
     for unit in anchors:
@@ -270,7 +272,7 @@ def group_companies(units: list[Unit]) -> Grouping:
                     return True
             # An approval printing no company name: the same company when it lists a person the
             # company's licence lists too.
-            return bool(not name and unit.document_type != COMPANY_TYPE and any(
+            return bool(not name and unit.document_type not in _TRADE_LICENCES and any(
                 same_name(member, listed) for listed in members for other in company for member in _members(other)
             ))
 

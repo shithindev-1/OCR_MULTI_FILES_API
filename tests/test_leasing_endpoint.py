@@ -585,7 +585,7 @@ def test_company_without_a_trade_license_is_rejected_before_any_model_call(
     response = _company_upload(client, [("passport.png", "1", "passport", "Signatory Passport")])
 
     assert response.status_code == 400
-    assert "A trade licence is required for a company" in response.json()["detail"]
+    assert "A trade licence or commercial licence is required for a company" in response.json()["detail"]
     assert calls == []
 
 

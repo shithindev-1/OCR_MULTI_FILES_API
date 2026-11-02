@@ -62,6 +62,7 @@ VERIFIABLE_TYPES = frozenset({
     "bank_statement",
     "ejari_certificate",
     "trade_license",
+    "commercial_license",
     "tenant_form",
     "initial_approval",
     "salary_certificate",
@@ -84,6 +85,8 @@ DOCUMENT_TYPE_ALIASES = {
     "residency_visa": "visa",
     # British spelling of the same document, which the model uses about as often as the American.
     "trade_licence": "trade_license",
+    "commercial_licence": "commercial_license",
+    "commercial_licence_certificate": "commercial_license",
     "business_license": "trade_license",
     "business_licence": "trade_license",
     "ejari": "ejari_certificate",
@@ -208,6 +211,10 @@ INDIVIDUAL_EXTRACTION_FIELDS = DATA_FIELDS + INDIVIDUAL_INTERNAL_FIELDS
 TENANT_TYPE_COMPANY = "company"
 # The one document a company submission cannot go without.
 COMPANY_REQUIRED_DOCUMENT_TYPE = "trade_license"
+# A commercial licence is a trade licence titled Commercial License: it satisfies that rule and is read,
+# grouped and checked exactly like one. Either name counts for the other in a type check.
+COMMERCIAL_LICENSE_TYPE = "commercial_license"
+TRADE_LICENCE_TYPES = frozenset({COMPANY_REQUIRED_DOCUMENT_TYPE, COMMERCIAL_LICENSE_TYPE})
 # On the type-detection endpoints, an initial approval satisfies that rule too.
 COMPANY_ALTERNATIVE_DOCUMENT_TYPE = "initial_approval"
 # The one document an individual submission cannot go without.
@@ -299,3 +306,11 @@ class OcrResponse(BaseModel):
 
 def empty_response() -> dict[str, Any]:
     return OcrResponse().model_dump()
+
+
+def same_document_type(declared: str, reported: str) -> bool:
+    """Whether a type the model reported is the declared one - a trade licence and a commercial licence
+    count as each other."""
+    if declared == reported:
+        return True
+    return declared in TRADE_LICENCE_TYPES and reported in TRADE_LICENCE_TYPES

@@ -26,10 +26,10 @@ _NUMBER_OWNER = {
     "passport_number": {"passport"},
     "national_id_number": {"national_id"},
     "visa_number": {"visa"},
-    "licence_number": {"trade_license", "initial_approval"},
+    "licence_number": {"trade_license", "commercial_license", "initial_approval"},
 }
 _COMPANY_DETAILS = {"company_name", "licence_number"}
-_LICENCE_TYPES = {"trade_license", "initial_approval"}
+_LICENCE_TYPES = {"trade_license", "commercial_license", "initial_approval"}
 
 
 def _quoted(labels: list[str]) -> str:

@@ -15,7 +15,7 @@ from PIL import Image
 
 from app.core.config import settings
 from app.main import app
-from app.schemas.ocr import COMPANY_DATA_FIELDS, DATA_FIELDS
+from app.schemas.ocr import COMPANY_DATA_FIELDS, COMPANY_EXTRACTION_FIELDS, DATA_FIELDS
 from app.services import blob_storage
 from app.services.gemini import get_gemini_service
 from app.services.leasing import sources
@@ -231,7 +231,7 @@ def test_missing_trade_licence_is_rejected_for_a_company(client: TestClient, mon
     response = _upload(client, ["eid.png"], tenant_type="company")
 
     assert response.status_code == 400
-    assert response.json()["detail"].startswith("A trade licence or initial approval is required for a company.")
+    assert response.json()["detail"].startswith("A trade licence, commercial licence or initial approval is required for a company.")
 
 
 def test_company_with_a_listed_signatory_succeeds(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -276,11 +276,11 @@ def test_company_whose_listed_people_were_not_uploaded_fails(
     assert (tenant["status"], tenant["company_name_en"]) == ("failed", None)
     licence, person = body["documents"]
     assert licence["error"] == (
-        "None of the people listed on this trade licence or initial approval were uploaded. "
+        "None of the people listed on this trade licence, commercial licence or initial approval were uploaded. "
         "Please upload the ID documents of a person it lists."
     )
     assert person["error"].startswith(
-        "The person on 'National ID' is not listed on any uploaded trade licence or initial approval."
+        "The person on 'National ID' is not listed on any uploaded trade licence, commercial licence or initial approval."
     )
 
 
@@ -607,7 +607,7 @@ def test_company_tenants_are_one_per_licence_and_listed_signatory(client: TestCl
     zaid = body["documents"][-1]
     assert zaid["tenant_ids"] == []
     assert zaid["error"].startswith(
-        "The person on 'National ID 3' is not listed on any uploaded trade licence or initial approval."
+        "The person on 'National ID 3' is not listed on any uploaded trade licence, commercial licence or initial approval."
     )
 
 
@@ -989,7 +989,7 @@ def test_a_company_document_must_be_for_the_licence_company(
     assert body["form_data"][0]["status"] == "success"
     ejari = next(d for d in body["documents"] if d["document_type"] == "ejari_certificate")
     assert ejari["error"] == (
-        "'Ejari certificate' is not for the company on the trade licence or initial approval. "
+        "'Ejari certificate' is not for the company on the trade licence, commercial licence or initial approval. "
         "Please upload the company's own Ejari certificate, or remove it."
     )
 
@@ -1644,3 +1644,51 @@ def test_a_rental_index_for_another_property_gets_its_own_error(client: TestClie
         "'Rental index' doesn't match the property on the tenant's Ejari certificate or tenancy contract. "
         "Please upload the matching Ejari certificate or tenancy contract, or remove it."
     )
+
+
+# --- commercial licence: its own type, read and grouped like a trade licence -----------------------
+
+def test_a_commercial_licence_counts_as_the_trade_licence_in_every_type_check() -> None:
+    from app.schemas.ocr import canonical_document_type, same_document_type
+    from app.services.post_processing import document_type_matches
+
+    assert canonical_document_type("commercial_licence") == "commercial_license"
+    assert same_document_type("commercial_license", "trade_license") and same_document_type("trade_license", "commercial_license")
+    assert not same_document_type("commercial_license", "initial_approval")
+    # A caller declaring trade_license for a licence the model reads as commercial_license is not rejected.
+    assert document_type_matches("trade_license", ["commercial_license"])
+    assert not document_type_matches("commercial_license", ["passport"])
+
+
+@pytest.mark.parametrize("detect", [True, False])
+def test_a_commercial_licence_satisfies_the_company_rule(detect: bool) -> None:
+    from fastapi import HTTPException
+
+    from app.services.leasing.rules import require_mandatory_document
+
+    require_mandatory_document("company", ["commercial_license", "passport"], accept_initial_approval=detect)
+    with pytest.raises(HTTPException):
+        require_mandatory_document("company", ["passport"], accept_initial_approval=detect)
+
+
+def test_a_company_with_a_commercial_licence_is_one_tenant_with_its_licence_fields(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub(
+        monkeypatch,
+        segments={"cl.png": [_region("commercial_license", 1)], "eid.png": [_region("national_id", 1)]},
+        answers={
+            "cl.png": _raw(["commercial_license"], fields=COMPANY_EXTRACTION_FIELDS, Company_Name_En="Asico Real Estate",
+                           Trade_License_Number="760408", License_Members="Ahmed Khan (Owner)"),
+            "eid.png": _raw(["national_id"], fields=COMPANY_EXTRACTION_FIELDS, Signatory_Name_En="Ahmed Khan",
+                            Holder_Name="Ahmed Khan", Signatory_National_Id="784-1980-1111111-1"),
+        },
+    )
+
+    body = _upload(client, ["cl.png", "eid.png"], tenant_type="company").json()
+
+    assert body["status"] == "success"
+    [tenant] = body["form_data"]
+    assert (tenant["company_name_en"], tenant["trade_license_number"]) == ("Asico Real Estate", "760408")
+    licence = body["documents"][0]
+    assert (licence["document_type"], licence["status"], licence["tenant_ids"]) == ("commercial_license", "valid", ["tenant_1"])

@@ -204,8 +204,21 @@ REGISTRY: dict[str, DocumentSpec] = {spec.document_type: spec for spec in (
     DocumentSpec(
         "trade_license", "trade licence",
         "a trade licence of any layout or issuer - mainland or free zone, from any emirate or authority, titled "
-        "for example Trade Licence, Commercial Licence, Business Licence, Professional Licence or Industrial "
-        "Licence, as a card, a certificate or an e-licence. It describes a company, not a person.",
+        "for example Trade Licence, Business Licence, Professional Licence or Industrial Licence, as a card, a "
+        "certificate or an e-licence. It describes a company, not a person. In Document_Types_Present, a licence "
+        "whose printed title is Commercial License or Commercial Licence is reported as commercial_license.",
+        ("License_Members",),
+        ("Company_Name_En", "Company_Name_Ar", "Trade_License_Number", "Trade_License_Issue_Date",
+         "Trade_License_Expiry", "Trade_License_Issuer", "License_Members"),
+        "the company name, the licence number, the expiry date and the list of owners or managers",
+        company_links=("Trade_License_Number",),
+    ),
+    DocumentSpec(
+        "commercial_license", "commercial licence",
+        "a commercial licence - a trade licence whose printed title is Commercial License or Commercial Licence "
+        "(for example from Dubai's Department of Economy and Tourism), as a card, a certificate or an e-licence. It "
+        "describes a company, not a person; read its number, dates and issuer as the trade licence fields. In "
+        "Document_Types_Present, report it as commercial_license.",
         ("License_Members",),
         ("Company_Name_En", "Company_Name_Ar", "Trade_License_Number", "Trade_License_Issue_Date",
          "Trade_License_Expiry", "Trade_License_Issuer", "License_Members"),
@@ -336,6 +349,7 @@ _OWN_NUMBERS = {
     "passport": ("Passport_Number", "Signatory_Passport_Number"),
     "visa": ("Visa_Number", "Signatory_Visa_Number"),
     "trade_license": ("Trade_License_Number",),
+    "commercial_license": ("Trade_License_Number",),
     "initial_approval": ("Initial_Approval_Number",),
 }
 

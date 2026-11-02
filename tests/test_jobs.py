@@ -216,7 +216,7 @@ def test_a_company_job_without_a_trade_licence_is_rejected_before_it_starts(live
         "document_id": "1", "document_type": "passport", "document_name": "Passport",
     })
     assert response.status_code == 400
-    assert "trade licence is required" in response.json()["detail"]
+    assert "trade licence or commercial licence is required" in response.json()["detail"]
 
 
 def test_an_individual_job_without_a_national_id_is_rejected_before_it_starts(live_client: TestClient) -> None:

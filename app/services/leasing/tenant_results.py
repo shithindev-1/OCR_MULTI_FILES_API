@@ -67,10 +67,10 @@ def _unmatched_message(unit: Unit, name: str, company: bool, *, several: bool) -
         return f"We couldn't read the property on '{name}'. Please upload a clearer copy."
     if company:
         if has_link_details(unit, company):
-            return (f"'{name}' is not for the company on the trade licence or initial approval. "
-                    f"Please upload the company's own {kind}, or remove it.")
-        return (f"We couldn't confirm that '{name}' is for the company on the trade licence or initial approval. "
-                "Please upload a clearer copy.")
+            return (f"'{name}' is not for the company on the trade licence, commercial licence or initial "
+                    f"approval. Please upload the company's own {kind}, or remove it.")
+        return (f"We couldn't confirm that '{name}' is for the company on the trade licence, commercial licence or "
+                "initial approval. Please upload a clearer copy.")
     if unit.document_type in LICENCE_TYPES:
         if has_link_details(unit, company):
             return (f"'{name}' doesn't list {whom}. "
@@ -173,8 +173,9 @@ async def finish_per_tenant(
     for key in (key for keys in grouping.unlisted_people for key in keys):
         for index in key:
             add_error(documents_report[index], (
-                f"The person on '{items[index]['document_name']}' is not listed on any uploaded trade licence "
-                "or initial approval. Please upload their company's trade licence or initial approval."
+                f"The person on '{items[index]['document_name']}' is not listed on any uploaded trade licence, "
+                "commercial licence or initial approval. Please upload their company's trade licence, commercial "
+                "licence or initial approval."
             ))
 
     def indices(tenant: Tenant) -> list[int]:
@@ -190,8 +191,8 @@ async def finish_per_tenant(
             if not tenant.signatory_keys:
                 for index in indices(tenant):
                     add_error(documents_report[index], (
-                        "None of the people listed on this trade licence or initial approval were uploaded. "
-                        "Please upload the ID documents of a person it lists."
+                        "None of the people listed on this trade licence, commercial licence or initial approval were "
+                        "uploaded. Please upload the ID documents of a person it lists."
                     ))
 
     # Each individual needs their own National ID.
