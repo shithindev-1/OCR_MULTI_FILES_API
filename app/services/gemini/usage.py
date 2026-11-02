@@ -3,6 +3,7 @@
 import functools
 import json
 import logging
+import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -24,6 +25,15 @@ _usage_for: ContextVar[tuple[tuple[str, str], ...]] = ContextVar("ocr_usage_for"
 # Names that stand for several documents - a file whose split call ran before its documents were
 # known - and the documents they turned out to hold. One dict per request.
 _usage_groups: ContextVar[dict[str, list[tuple[str, str]]] | None] = ContextVar("ocr_usage_groups", default=None)
+
+# timing.log: when the request arrived, how long each of its stages took, and how long each step took for
+# each document (a step = the work done for one document in one stage: its reading, its crop, ...).
+_timing_started: ContextVar[float | None] = ContextVar("ocr_timing_started", default=None)
+_timing_stages: ContextVar[list[tuple[str, float]] | None] = ContextVar("ocr_timing_stages", default=None)
+_timing_steps: ContextVar[list[dict[str, Any]] | None] = ContextVar("ocr_timing_steps", default=None)
+# The steps already being timed in this task, so a step that calls itself (a reading completed by a
+# second reading) is timed once, as a whole.
+_active_steps: ContextVar[frozenset[str]] = ContextVar("ocr_active_steps", default=frozenset())
 
 
 # The calls a request can make, named for what they are for rather than for the method that makes
@@ -53,10 +63,38 @@ CALL_SEGMENTATION = "segmentation"
 CROP_ROTATE_CALLS = (CALL_CROP, CALL_ROTATION)
 
 
-def start_usage_tracking() -> None:
-    """Begin a fresh per-request tally. Call once, at the start of a request."""
+def start_usage_tracking(started_at: float | None = None) -> None:
+    """Begin a fresh per-request tally. Call once, at the start of a request. `started_at` (perf_counter)
+    is when the request arrived, when that was before this call (files downloaded first)."""
     _usage_records.set([])
     _usage_groups.set({})
+    _timing_started.set(started_at if started_at is not None else time.perf_counter())
+    _timing_stages.set([])
+    _timing_steps.set([])
+
+
+def record_stage(stage: str, seconds: float) -> None:
+    """One stage of the request (all its documents together) and how long it took."""
+    stages = _timing_stages.get()
+    if stages is not None:
+        stages.append((stage, float(seconds)))
+
+
+@contextmanager
+def timed_step(step: str) -> Iterator[None]:
+    """Times the work done inside this block for the documents it is charged to (see `usage_for`)."""
+    if step in _active_steps.get():
+        yield
+        return
+    token = _active_steps.set(_active_steps.get() | {step})
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        _active_steps.reset(token)
+        steps = _timing_steps.get()
+        if steps is not None:
+            steps.append({"step": step, "seconds": time.perf_counter() - started, "for": _usage_for.get()})
 
 
 def documents_named(name: Any, document_type: Any) -> list[tuple[str, str]]:
@@ -75,13 +113,17 @@ def usage_for(*documents: tuple[str, str]) -> Iterator[None]:
         _usage_for.reset(token)
 
 
-def charged_to(documents_of: Callable[..., Iterable[tuple[str, str]]]) -> Callable[..., Any]:
-    """Decorator for an async function: its model calls are charged to `documents_of(*args, **kwargs)`."""
+def charged_to(documents_of: Callable[..., Iterable[tuple[str, str]]], step: str | None = None) -> Callable[..., Any]:
+    """Decorator for an async function: its model calls are charged to `documents_of(*args, **kwargs)`,
+    and with `step` its run is timed as that step of those documents (timing.log)."""
     def wrap(function: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(function)
         async def run(*args: Any, **kwargs: Any) -> Any:
             with usage_for(*documents_of(*args, **kwargs)):
-                return await function(*args, **kwargs)
+                if step is None:
+                    return await function(*args, **kwargs)
+                with timed_step(step):
+                    return await function(*args, **kwargs)
         return run
     return wrap
 
@@ -148,7 +190,57 @@ def log_usage_summary(request_id: str, status: str, detection_enabled: bool) -> 
         **summary,
     }))
     _log_document_usage(request_id, status)
+    _log_timing(request_id, status)
     return summary
+
+
+def _expand(documents: tuple[tuple[str, str], ...]) -> list[tuple[str, str]]:
+    groups = _usage_groups.get() or {}
+    owners: list[tuple[str, str]] = []
+    for name, document_type in documents:
+        for owner in groups.get(name) or [(name, document_type)]:
+            if owner not in owners:
+                owners.append(owner)
+    return owners or [("unassigned", "unassigned")]
+
+
+def timing_summary() -> dict[str, Any]:
+    """This request's timing: total seconds, seconds per stage, and per document the seconds of each step
+    done for it. A step done for several documents together (a file's split, a cross-check) took that time
+    for each of them, so it is listed under each and marked `shared`; documents run side by side, so a
+    request's total is not the sum of its documents."""
+    started = _timing_started.get()
+    total = time.perf_counter() - started if started is not None else None
+    stages: dict[str, float] = {}
+    for stage, seconds in _timing_stages.get() or []:
+        stages[stage] = round(stages.get(stage, 0.0) + seconds, 2)
+    documents: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    for step in _timing_steps.get() or []:
+        owners = _expand(step["for"])
+        for owner in owners:
+            entry = documents.setdefault(owner, {}).setdefault(step["step"], {"seconds": 0.0, "shared": False})
+            entry["seconds"] = round(entry["seconds"] + step["seconds"], 2)
+            entry["shared"] = entry["shared"] or len(owners) > 1
+    return {
+        "total_seconds": round(total, 2) if total is not None else None,
+        "stages": stages,
+        "documents": [
+            {"document": name, "document_type": document_type or "unknown", "steps": steps,
+             "document_seconds": round(sum(entry["seconds"] for entry in steps.values()), 2)}
+            for (name, document_type), steps in documents.items()
+        ],
+    }
+
+
+def _log_timing(request_id: str, status: str) -> None:
+    """Writes this request's timing to timing.log as one JSON object: the request's total and stage times, and
+    under `documents` each document's type and step times."""
+    timing = timing_summary()
+    timing_logger.info(json.dumps({
+        **log_timestamps(), "request_id": request_id, "status": status,
+        "total_seconds": timing["total_seconds"], "stages": timing["stages"],
+        "document_count": len(timing["documents"]), "documents": timing["documents"],
+    }))
 
 
 _CALLS = (CALL_SEGMENTATION, CALL_EXTRACTION, CALL_VALIDATION, CALL_CROP, CALL_ROTATION)
@@ -205,3 +297,4 @@ def _log_document_usage(request_id: str, status: str) -> None:
 
 usage_logger = logging.getLogger("uae_ocr.usage")
 document_usage_logger = logging.getLogger("uae_ocr.document_usage")
+timing_logger = logging.getLogger("uae_ocr.timing")

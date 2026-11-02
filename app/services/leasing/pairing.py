@@ -59,7 +59,7 @@ async def match_sides(group: list[dict[str, Any]], *, request_id: str) -> list[l
     if fronts and backs:
         if settings.validation_enabled:
             @charged_to(lambda front, back: documents_named(front["document_name"], front["document_type"])
-                        + documents_named(back["document_name"], back["document_type"]))
+                        + documents_named(back["document_name"], back["document_type"]), step="pairing")
             async def confirm(front: dict[str, Any], back: dict[str, Any]) -> bool:
                 try:
                     return await call_with_one_retry(

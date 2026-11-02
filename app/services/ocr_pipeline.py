@@ -38,6 +38,7 @@ from app.services.gemini import (
     documents_named,
     get_gemini_service,
     log_usage_summary,
+    timed_step,
     usage_for,
 )
 from app.services.post_processing import (
@@ -85,7 +86,7 @@ async def call_with_one_retry(call: Any, *, what: str, request_id: str) -> Any:
 
 
 @charged_to(lambda **kw: [d for document in kw["documents"]
-                 for d in documents_named(document["document_name"], document["document_type"])])
+                 for d in documents_named(document["document_name"], document["document_type"])], step="cross_verification")
 async def verify_documents_across(
     *, request_id: str, documents: list[dict[str, Any]], tenant_type: str | None = None,
     short_messages: bool = False,
@@ -244,7 +245,7 @@ async def _fill_from_general_reading(data: dict[str, Any], **reading: Any) -> di
     return {field: general_data[field] if field in filled else value for field, value in data.items()}
 
 
-@charged_to(lambda **kw: documents_named(kw["document_name"], kw["document_type"]))
+@charged_to(lambda **kw: documents_named(kw["document_name"], kw["document_type"]), step="extraction")
 async def extract_and_type_check(
     *,
     request_id: str,
@@ -435,7 +436,7 @@ def _build_merged_pdf(first_content: bytes, first_mime: str, second_content: byt
 
 
 @charged_to(lambda **kw: documents_named(kw["front"]["document_name"], kw["document_type"])
-    + documents_named(kw["back"]["document_name"], kw["document_type"]))
+    + documents_named(kw["back"]["document_name"], kw["document_type"]), step="pairing")
 async def _merge_front_back(
     *,
     request_id: str,
@@ -598,7 +599,7 @@ async def resolve_incomplete_pairs(
     return resolved
 
 
-@charged_to(lambda **kw: documents_named(kw["document"]["document_name"], kw["document"]["document_type"]))
+@charged_to(lambda **kw: documents_named(kw["document"]["document_name"], kw["document"]["document_type"]), step="self_verification")
 async def run_self_verification(
     *,
     request_id: str,
@@ -759,7 +760,8 @@ async def run_ocr_batch(
     # for nothing.
     if detection_enabled:
         for document in extracted:
-            with usage_for(*documents_named(document["document_name"], document["document_type"])):
+            with usage_for(*documents_named(document["document_name"], document["document_type"])), \
+                    timed_step("crop_rotate_upload"):
                 saved_paths = await run_detection(
                     content=document["content"],
                     filename=document["filename"],

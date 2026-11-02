@@ -137,6 +137,15 @@ def configure_logging(settings: Settings) -> None:
         logging.Formatter("%(message)s"),
         propagate=False,
     )
+    # One JSON object per request: its total time and each stage's time, and under "documents" each
+    # document's type and the time of each step done for it.
+    _configure_file_logger(
+        "uae_ocr.timing",
+        log_directory / "timing.log",
+        settings,
+        logging.Formatter("%(message)s"),
+        propagate=False,
+    )
     # One JSON object per line: the rotation Gemini asked for and what OpenCV actually applied,
     # per cropped document, so bad rotations can be audited without re-running anything.
     _configure_file_logger(

@@ -27,7 +27,13 @@ from app.services.blob_storage import BlobStorageError
 from app.services.concurrency import run_concurrently
 from app.services.detection import run_detection, save_merged_document
 from app.services.form_normalization import normalize_form_data
-from app.services.gemini import charged_to, documents_named, get_gemini_service, start_usage_tracking
+from app.services.gemini import (
+    charged_to,
+    documents_named,
+    get_gemini_service,
+    record_stage,
+    start_usage_tracking,
+)
 from app.services.leasing.outputs import (
     document_folder,
     merged_folder,
@@ -130,7 +136,9 @@ async def process_batch(
     if not detected_types:
         # The type-detection request started its own tally before its split calls; starting a new
         # one here would wipe them.
-        start_usage_tracking()
+        start_usage_tracking(started_at)
+        # Until now: receiving the upload, or downloading the linked files (timing.log).
+        record_stage("receive", time.perf_counter() - started_at)
 
     # One log line per stage: how long it took, and how far into the request it ended.
     stage_started = time.perf_counter()
@@ -142,6 +150,7 @@ async def process_batch(
             "Leasing stage=%s request_id=%s documents=%d duration_sec=%.2f elapsed_sec=%.2f",
             stage, request_id, documents, now - stage_started, now - started_at,
         )
+        record_stage(stage, now - stage_started)
         stage_started = now
 
     progress.report("download")
@@ -269,7 +278,8 @@ async def process_batch(
 
     # Crops, rotates and uploads one passed document's result - used once the request (or, when
     # types were detected, its tenant) has passed.
-    @charged_to(lambda document: documents_named(document["document_name"], document["document_type"]))
+    @charged_to(lambda document: documents_named(document["document_name"], document["document_type"]),
+                step="crop_rotate_upload")
     async def crop_and_upload(document: dict[str, Any]) -> bool:
         is_merged = bool(document.get("is_merged_pair"))
         upload_indices = merged_indices(document, index_by_name)

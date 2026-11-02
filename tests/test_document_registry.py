@@ -215,7 +215,6 @@ def test_page_numbering_is_never_a_problem_on_the_detect_self_check() -> None:
     assert "PAGES - never report" not in prompts.SELF_VERIFICATION_PROMPT
 
 
-
 # --- document-usage.log: tokens per document, adding up to the request's total -----------------------
 
 def test_tokens_are_charged_per_document_and_add_up_to_the_request() -> None:
@@ -245,3 +244,30 @@ def test_tokens_are_charged_per_document_and_add_up_to_the_request() -> None:
     total = usage.usage_summary()["request_total"]
     assert sum(row["document_total"]["input_tokens"] for row in rows.values()) == total["input_tokens"]
     assert sum(row["document_total"]["output_tokens"] for row in rows.values()) == total["output_tokens"]
+
+
+def test_timing_lists_each_stage_and_each_document_step() -> None:
+    import time
+
+    from app.services.gemini import usage
+
+    usage.start_usage_tracking(time.perf_counter() - 1.0)       # arrived a second ago
+    usage.record_stage("receive", 1.0)
+    with usage.usage_for(("file scan.png #1", "")), usage.timed_step("segmentation"):
+        pass
+    usage.share_usage("file scan.png #1", [("Passport", "passport"), ("Visa", "visa")])
+    with usage.usage_for(*usage.documents_named("Passport", "passport")), usage.timed_step("extraction"):
+        with usage.timed_step("extraction"):                     # a second reading inside the first: timed once
+            pass
+    usage.record_stage("extraction", 2.5)
+
+    timing = usage.timing_summary()
+
+    assert timing["total_seconds"] >= 1.0
+    assert timing["stages"] == {"receive": 1.0, "extraction": 2.5}
+    rows = {row["document"]: row for row in timing["documents"]}
+    assert set(rows["Passport"]["steps"]) == {"segmentation", "extraction"}
+    assert rows["Passport"]["steps"]["segmentation"]["shared"] is True
+    assert rows["Passport"]["steps"]["extraction"]["shared"] is False
+    assert set(rows["Visa"]["steps"]) == {"segmentation"}
+    assert len([s for s in usage._timing_steps.get() if s["step"] == "extraction"]) == 1

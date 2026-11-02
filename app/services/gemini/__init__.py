@@ -47,9 +47,12 @@ from app.services.gemini.usage import (
     document_usage,
     documents_named,
     log_usage_summary,
+    record_stage,
     record_usage,
     share_usage,
     start_usage_tracking,
+    timed_step,
+    timing_summary,
     usage_for,
     usage_summary,
 )
@@ -97,4 +100,7 @@ __all__ = [
     "documents_named",
     "share_usage",
     "document_usage",
+    "record_stage",
+    "timed_step",
+    "timing_summary",
 ]

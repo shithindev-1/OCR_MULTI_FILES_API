@@ -16,7 +16,14 @@ from app.core.config import settings
 from app.schemas.leasing import SourceDocument
 from app.services import blob_storage
 from app.services.concurrency import run_concurrently
-from app.services.gemini import get_gemini_service, share_usage, start_usage_tracking, usage_for
+from app.services.gemini import (
+    get_gemini_service,
+    record_stage,
+    share_usage,
+    start_usage_tracking,
+    timed_step,
+    usage_for,
+)
 from app.services.leasing import sources as source_fetch
 from app.services.leasing.batch import process_batch
 from app.services.leasing.rules import require_mandatory_document
@@ -54,7 +61,7 @@ async def _segment_one(item: dict[str, Any], request_id: str) -> None:
     item["mime_type"] = validated.mime_type
     try:
         # Charged to the file until its documents are known - then shared among them (process_detected).
-        with usage_for((_file_usage_name(item), "")):
+        with usage_for((_file_usage_name(item), "")), timed_step("segmentation"):
             item["segments"] = await call_with_one_retry(
                 lambda: segment_file(
                     content=item["content"], mime_type=validated.mime_type, sha256=validated.sha256,
@@ -185,8 +192,12 @@ async def process_detected(
 
     # One token tally for the whole request, started before the split calls so they are counted
     # too; the batch below adds to it instead of starting a new one.
-    start_usage_tracking()
+    start_usage_tracking(started_at)
+    # Until now: receiving the upload, or downloading the linked files (timing.log).
+    record_stage("receive", time.perf_counter() - started_at)
+    split_started = time.perf_counter()
     await run_concurrently([partial(_segment_one, item, document_refnumber) for item in items])
+    record_stage("segmentation", time.perf_counter() - split_started)
 
     def finish(status: str, documents: list[dict[str, Any]], tenants: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         return build_detect_response(

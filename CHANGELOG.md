@@ -5,6 +5,12 @@ major version means a change that existing callers must adapt to.
 
 ## Unreleased
 
+### Added (logs only - responses and existing logs unchanged)
+- **`logs/timing.log`**: one JSON object per request - `total_seconds`, seconds per stage (`stages`: receive /
+  download, segmentation, extraction, pairing, self_verification, cross_verification, crop_rotate_upload) and
+  `documents`: per document its `document_type`, `document_seconds` and the seconds of each step done for it. A step
+  done for several documents together (a file's split, a cross-check) is listed under each, marked `shared`.
+
 ### Added (all endpoints - tell the .NET team)
 - **Commercial licence** (`document_type: "commercial_license"`): a licence whose printed title is Commercial
   License. For a company it satisfies the mandatory-document rule like a trade licence (old endpoints: trade licence
