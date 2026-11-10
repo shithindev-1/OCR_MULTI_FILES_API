@@ -94,6 +94,11 @@ def _parse_date(value: str, *, birth: bool) -> date | None:
             or _build(int(second), int(first), int(third), birth=birth))
 
 
+def parse_date(value: str, *, birth: bool = False) -> date | None:
+    """A printed date in any format this module reads, as a date - or None."""
+    return _parse_date(value, birth=birth)
+
+
 def format_date(value: str, *, birth: bool = False) -> str:
     """Any printed date as DD-MM-YYYY; unchanged if it cannot be read as a date."""
     parsed = _parse_date(value, birth=birth)

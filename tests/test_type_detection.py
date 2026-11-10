@@ -948,6 +948,8 @@ def test_a_trade_licence_that_lists_the_tenant_is_accepted_but_adds_no_data(
 
 @pytest.mark.parametrize(("extra", "expected"), [
     ({"Tenant_Name_En": "Magdy Abdelrehim Ibrahim Ali"}, None),
+    # A name part printed with a space on one document and without on the other is the same name.
+    ({"Tenant_Name_En": "MAGDY ABDEL REHIM IBRAHIM ALI"}, None),
     ({"National_Id": "784197160602542"}, None),
     ({"Tenant_Name_En": "Sara Ali"},
      "'Ejari certificate' doesn't mention the tenant. Please upload the tenant's own Ejari certificate, or remove it."),
@@ -1692,3 +1694,135 @@ def test_a_company_with_a_commercial_licence_is_one_tenant_with_its_licence_fiel
     assert (tenant["company_name_en"], tenant["trade_license_number"]) == ("Asico Real Estate", "760408")
     licence = body["documents"][0]
     assert (licence["document_type"], licence["status"], licence["tenant_ids"]) == ("commercial_license", "valid", ["tenant_1"])
+
+
+# --- a passport's pages sent as separate files; an expired copy next to a valid one ----------------
+
+ANUP = {"Tenant_Name_En": "Anupkumar Krishnan", "Date_Of_Birth": "22/12/1978"}
+
+
+def test_a_passport_back_page_sent_as_its_own_file_is_joined_to_its_main_page(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub(
+        monkeypatch,
+        segments={"eid.png": [_region("national_id", 1)], "pp_back.png": [_region("passport", 1)],
+                  "pp_main.png": [_region("passport", 1)]},
+        answers={
+            "eid.png": _raw(["national_id"], National_Id="784-1978-2940540-2", **ANUP),
+            # The back (address) page prints the passport number by its barcode, but no name or dates.
+            "pp_back.png": _raw(["passport"], Passport_Number="Z4918629", Home_City="Coimbatore"),
+            "pp_main.png": _raw(["passport"], Passport_Number="Z4918629", Passport_Expiry="28/07/2030", **ANUP),
+        },
+    )
+
+    body = _upload(client, ["eid.png", "pp_back.png", "pp_main.png"]).json()
+
+    assert body["status"] == "success"
+    [tenant] = body["form_data"]
+    assert (tenant["status"], tenant["passport_number"], tenant["home_city"]) == ("success", "Z4918629", "Coimbatore")
+    passport = next(d for d in body["documents"] if d["document_type"] == "passport")
+    assert passport["merged"] is True and passport["status"] == "valid"
+    assert sorted(source["file_name"] for source in passport["sources"]) == ["pp_back.png", "pp_main.png"]
+
+
+def test_a_passport_page_matching_no_uploaded_passport_gets_its_own_message(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sara_pp = {"Tenant_Name_En": "Sara Ali", "Date_Of_Birth": "15/07/1985"}
+    _stub(
+        monkeypatch,
+        segments={name: [_region(kind, 1)] for name, kind in (
+            ("eid1.png", "national_id"), ("eid2.png", "national_id"), ("pp1.png", "passport"),
+            ("pp2.png", "passport"), ("pp_back.png", "passport"))},
+        answers={
+            "eid1.png": _raw(["national_id"], National_Id="784-1978-2940540-2", **ANUP),
+            "eid2.png": _raw(["national_id"], National_Id="784-1985-2222222-2", **sara_pp),
+            "pp1.png": _raw(["passport"], Passport_Number="Z4918629", Passport_Expiry="28/07/2030", **ANUP),
+            "pp2.png": _raw(["passport"], Passport_Number="N0122184", Passport_Expiry="01/01/2031", **sara_pp),
+            "pp_back.png": _raw(["passport"], Passport_Number="K9999999"),
+        },
+    )
+
+    body = _upload(client, ["eid1.png", "eid2.png", "pp1.png", "pp2.png", "pp_back.png"]).json()
+
+    page = next(d for d in body["documents"] if [s["file_name"] for s in d["sources"]] == ["pp_back.png"])
+    assert page["error"] == "This passport page doesn't match any uploaded passport. Please upload its main page with it."
+    assert [t["status"] for t in body["form_data"]] == ["success", "success"]
+
+
+def test_an_expired_copy_is_set_aside_when_a_valid_copy_of_that_document_is_uploaded(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "validation_enabled", True)
+    _stub(
+        monkeypatch,
+        segments={"new_id.png": [_region("national_id", 1)], "old_id.png": [_region("national_id", 1)]},
+        answers={
+            "new_id.png": _raw(["national_id"], National_Id="784-1978-2940540-2", National_Id_Expiry="03/07/2027", **ANUP),
+            "old_id.png": _raw(["national_id"], National_Id="784-1978-2940540-2", National_Id_Expiry="11/06/2025", **ANUP),
+        },
+    )
+    old_width = _WIDTHS["old_id.png"]
+
+    async def fake_verify(**kwargs: Any) -> list[str]:
+        with Image.open(io.BytesIO(kwargs["content"])) as image:
+            expired = image.width == old_width
+        return ["Your National ID expired on 11-06-2025. Please upload a valid National ID."] if expired else []
+
+    async def no_conflicts(**kwargs: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(get_gemini_service(), "verify_document", fake_verify)
+    monkeypatch.setattr(get_gemini_service(), "verify_documents_cross", no_conflicts)
+
+    body = _upload(client, ["new_id.png", "old_id.png"]).json()
+
+    assert body["status"] == "success"
+    [tenant] = body["form_data"]
+    assert (tenant["status"], tenant["national_id_expiry"]) == ("success", "03-07-2027")
+    new, old = body["documents"]
+    assert new["status"] == "valid"
+    assert (old["status"], old["tenant_ids"]) == ("ignored", ["tenant_1"])
+    assert old["error"] == "This National ID has expired; the valid National ID uploaded with it is used instead."
+
+
+def test_only_expired_copies_still_fail_the_tenant(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "validation_enabled", True)
+    _stub(
+        monkeypatch,
+        segments={"old_id.png": [_region("national_id", 1)]},
+        answers={"old_id.png": _raw(["national_id"], National_Id="784-1978-2940540-2", National_Id_Expiry="11/06/2025", **ANUP)},
+    )
+
+    async def expired(**kwargs: Any) -> list[str]:
+        return ["Your National ID expired on 11-06-2025. Please upload a valid National ID."]
+
+    monkeypatch.setattr(get_gemini_service(), "verify_document", expired)
+
+    body = _upload(client, ["old_id.png"]).json()
+
+    assert body["status"] == "failed"
+    assert body["documents"][0]["status"] == "invalid"
+
+
+def test_another_passports_page_is_never_joined_even_to_the_only_passport(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub(
+        monkeypatch,
+        segments={"eid.png": [_region("national_id", 1)], "pp_main.png": [_region("passport", 1)],
+                  "pp_back.png": [_region("passport", 1)]},
+        answers={
+            "eid.png": _raw(["national_id"], National_Id="784-1978-2940540-2", **ANUP),
+            "pp_main.png": _raw(["passport"], Passport_Number="Z4918629", Passport_Expiry="28/07/2030", **ANUP),
+            "pp_back.png": _raw(["passport"], Passport_Number="K1234567"),     # someone else's passport
+        },
+    )
+
+    body = _upload(client, ["eid.png", "pp_main.png", "pp_back.png"]).json()
+
+    page = next(d for d in body["documents"] if [s["file_name"] for s in d["sources"]] == ["pp_back.png"])
+    assert page["error"] == "This passport page doesn't match any uploaded passport. Please upload its main page with it."
+    assert page["tenant_ids"] == []
+    assert body["form_data"][0]["status"] == "success"                   # the tenant's own documents still pass

@@ -508,6 +508,11 @@ async def _merge_front_back(
     }
 
 
+async def merge_document_pages(**kwargs: Any) -> dict[str, Any]:
+    """One document from two separately-uploaded parts of it (see `_merge_front_back`)."""
+    return await _merge_front_back(**kwargs)
+
+
 async def resolve_incomplete_pairs(
     *,
     request_id: str,

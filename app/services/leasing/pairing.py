@@ -14,6 +14,7 @@ from app.services.leasing.reports import first_error_message, indices_named
 from app.services.ocr_pipeline import (
     VerificationUnavailable,
     call_with_one_retry,
+    merge_document_pages,
     resolve_incomplete_pairs,
 )
 
@@ -92,6 +93,99 @@ async def match_sides(group: list[dict[str, Any]], *, request_id: str) -> list[l
     return [list(pair) for pair in pairs] + ([rest] if rest else [])
 
 
+_PASSPORT_NUMBER_FIELDS = ("Passport_Number", "Signatory_Passport_Number")
+# A passport's main (data) page is the one that prints its holder's date of birth or the passport's expiry.
+_DATA_PAGE_FIELDS = ("Date_Of_Birth", "Passport_Expiry", "Signatory_Passport_Expiry")
+
+
+def _passport_number(candidate: dict[str, Any]) -> str | None:
+    for field in _PASSPORT_NUMBER_FIELDS:
+        value = re.sub(r"[^A-Za-z0-9]", "", str(candidate["data"].get(field) or "")).upper()
+        if len(value) >= 5:
+            return value
+    return None
+
+
+def _is_data_page(candidate: dict[str, Any]) -> bool:
+    return any(candidate["data"].get(field) for field in _DATA_PAGE_FIELDS)
+
+
+async def join_passport_pages(
+    candidates: list[dict[str, Any]], *, request_id: str, index_by_name: dict[str, int],
+    documents_report: list[dict[str, Any]], started_at: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """A passport's other page (its address or observation page) uploaded as a file of its own is joined
+    to the passport's main page, so the two are read, checked and grouped as one passport.
+
+    A page printing a passport number goes only with the main page printing the same number. A page whose
+    number could not be read goes with the main page the model confirms is the same passport (with
+    validation switched off: the only main page). A page that belongs to no uploaded passport is never
+    joined - it gets its own message. Returns the candidates left to pair as before, and the joined passports.
+    """
+    passports = [c for c in candidates if c["document_type"] == "passport"]
+    main_pages = [c for c in passports if _is_data_page(c)]
+    other_pages = [c for c in passports if not _is_data_page(c)]
+    if not main_pages or not other_pages:
+        return candidates, []
+
+    async def same_passport(main: dict[str, Any], page: dict[str, Any]) -> bool:
+        if not settings.validation_enabled:
+            return False
+        try:
+            return await call_with_one_retry(
+                lambda: get_gemini_service().verify_document_pair(
+                    first_content=main["content"], first_mime=main["mime_type"],
+                    second_content=page["content"], second_mime=page["mime_type"],
+                    document_type="passport",
+                ),
+                what="Passport page confirmation", request_id=request_id,
+            )
+        except VerificationUnavailable:
+            return False
+
+    joined_to: dict[int, dict[str, Any]] = {}   # id(main page) -> the page joined to it
+    unmatched: list[dict[str, Any]] = []
+    for page in other_pages:
+        free = [main for main in main_pages if id(main) not in joined_to]
+        number = _passport_number(page)
+        match: dict[str, Any] | None = None
+        if number:
+            # Its own number decides: another passport's page is never joined.
+            match = next((main for main in free if _passport_number(main) == number), None)
+        elif free and settings.validation_enabled:
+            answers = [await same_passport(main, page) for main in free]
+            fits = [main for main, fits in zip(free, answers) if fits]
+            match = fits[0] if len(fits) == 1 else None
+        elif len(free) == 1:
+            match = free[0]
+        if match is None:
+            unmatched.append(page)
+        else:
+            match["_pair_confirmed_with"] = page["sha256"]
+            joined_to[id(match)] = page
+
+    joined: list[dict[str, Any]] = []
+    for main in main_pages:
+        page = joined_to.get(id(main))
+        if page is not None:
+            joined.append(await merge_document_pages(
+                request_id=request_id, front=main, back=page, document_type="passport",
+                validation_enabled=settings.validation_enabled, started_at=started_at,
+            ))
+    for page in unmatched:
+        page["_unmatched_page"] = True  # reported on itself; it joins no tenant
+        documents_report[index_by_name[page["document_name"]]]["error"] = (
+            "This passport page doesn't match any uploaded passport. Please upload its main page with it."
+        )
+    logger.info(
+        "Passport pages joined request_id=%s main_pages=%d other_pages=%d joined=%d unmatched=%d",
+        request_id, len(main_pages), len(other_pages), len(joined), len(unmatched),
+    )
+    used = {id(c) for c in joined_to.values()} | {id(main) for main in main_pages if id(main) in joined_to}
+    used |= {id(page) for page in unmatched}
+    return [c for c in candidates if id(c) not in used], joined
+
+
 async def resolve_pairs_per_type(
     *, request_id: str, candidates: list[dict[str, Any]], index_by_name: dict[str, int],
     documents_report: list[dict[str, Any]], started_at: float, match_several: bool = False,
@@ -102,6 +196,14 @@ async def resolve_pairs_per_type(
 
     `match_several` (type-detection endpoint, where one request may hold several people's cards)
     first matches several fronts to several backs - see `match_sides`."""
+    resolved: list[dict[str, Any]] = []
+    if match_several:
+        candidates, joined = await join_passport_pages(
+            candidates, request_id=request_id, index_by_name=index_by_name,
+            documents_report=documents_report, started_at=started_at,
+        )
+        resolved.extend(joined)
+
     by_type: dict[str, list[dict[str, Any]]] = {}
     for candidate in candidates:
         by_type.setdefault(candidate["document_type"], []).append(candidate)
@@ -110,7 +212,6 @@ async def resolve_pairs_per_type(
     for group in by_type.values():
         groups.extend(await match_sides(group, request_id=request_id) if match_several else [group])
 
-    resolved: list[dict[str, Any]] = []
     for group in groups:
         try:
             resolved.extend(await resolve_incomplete_pairs(

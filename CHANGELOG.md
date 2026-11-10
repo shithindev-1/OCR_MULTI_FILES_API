@@ -5,6 +5,20 @@ major version means a change that existing callers must adapt to.
 
 ## Unreleased
 
+### Fixed (type-detection endpoints - tell the .NET team)
+- **A passport's pages sent as separate files are one passport.** Its back/address page is joined to the main page
+  printing the same passport number (a page whose number can't be read: the one the model confirms): one entry,
+  `merged: true`, both files in `sources`, one processed PDF. It no longer fails as "main page missing" nor forms a
+  tenant of its own ("No National ID was uploaded for the person on 'Passport 1'"). A page matching no uploaded
+  passport gets "This passport page doesn't match any uploaded passport. Please upload its main page with it."
+- **An expired copy next to a valid one no longer fails the tenant.** When a tenant uploads a valid National ID,
+  passport or visa and also an older, expired copy of it, the expired copy is `status: "ignored"` with "This National
+  ID has expired; the valid National ID uploaded with it is used instead." - no processed file, nothing in form_data.
+  Only expired copies still fail as before.
+- **Names printed with or without a space match.** "ABD ALRAZAK MAMOUN BAROUDI" on the ID and "Abdalrazak Mamoun
+  Baroudi" on a bank statement are the same person, so the statement is no longer rejected with "doesn't mention the
+  tenant". At least two name parts must still match. Old endpoints unchanged.
+
 ### Added (logs only - responses and existing logs unchanged)
 - **`logs/timing.log`**: one JSON object per request - `total_seconds`, seconds per stage (`stages`: receive /
   download, segmentation, extraction, pairing, self_verification, cross_verification, crop_rotate_upload) and

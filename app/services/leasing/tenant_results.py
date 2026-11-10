@@ -3,6 +3,7 @@ tenants, and judging, cropping and filling form_data for each tenant on its own.
 
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import date
 from functools import partial
 from typing import Any
 
@@ -13,7 +14,7 @@ from app.schemas.ocr import (
     is_company,
 )
 from app.services.concurrency import run_concurrently
-from app.services.form_normalization import normalize_form_data
+from app.services.form_normalization import normalize_form_data, parse_date
 from app.services.leasing.cross_messages import message_for, resolve_documents
 from app.services.leasing.outputs import assign_type_file_names
 from app.services.leasing.reports import add_error, fold_merged_pairs, merged_indices
@@ -108,6 +109,58 @@ def _card_aliases(documents: list[dict[str, Any]], own: dict[str, int], types: d
             aliases[name.lower()] = label
     return aliases
 
+# The fields holding an identity document's own expiry date.
+_EXPIRY_FIELDS = {
+    "national_id": ("National_Id_Expiry", "Signatory_National_Id_Expiry"),
+    "passport": ("Passport_Expiry", "Signatory_Passport_Expiry"),
+    "visa": ("Visa_Expiry", "Signatory_Visa_Expiry"),
+}
+
+
+def _expiry(unit: Unit) -> date | None:
+    for field in _EXPIRY_FIELDS.get(unit.document_type, ()):
+        value = unit.data.get(field)
+        if value:
+            parsed = parse_date(str(value))
+            if parsed:
+                return parsed
+    return None
+
+
+def _set_aside_expired_copies(
+    tenants: list[Tenant], units: list[Unit], items: list[dict[str, Any]], documents_report: list[dict[str, Any]],
+) -> None:
+    """When a tenant uploaded a valid National ID, passport or visa and also an older, expired copy of the
+    same document (a renewed card, say), the expired copy is set aside - reported as ignored, never failing
+    the tenant, adding nothing to form_data and getting no processed file - and the valid one is used."""
+    unit_by_key = {unit.key: unit for unit in units}
+    today = date.today()
+    for tenant in tenants:
+        for document_type in _EXPIRY_FIELDS:
+            keys = [key for key in tenant.keys if unit_by_key[key].document_type == document_type]
+            valid = [key for key in keys if not any(documents_report[i]["error"] for i in key)]
+            expired = [
+                key for key in keys
+                if key not in valid and (_expiry(unit_by_key[key]) or today) < today
+            ]
+            if not valid or not expired:
+                continue
+            label = document_label(document_type)
+            for key in expired:
+                tenant.keys.remove(key)
+                if key in tenant.signatory_keys:
+                    tenant.signatory_keys.remove(key)
+                for index in key:
+                    documents_report[index]["error"] = (
+                        f"This {label} has expired; the valid {label} uploaded with it is used instead."
+                    )
+                    documents_report[index]["ignored"] = True
+            logger.info(
+                "Expired copies set aside document_type=%s documents=%s",
+                document_type, [index + 1 for key in expired for index in key],
+            )
+
+
 async def finish_per_tenant(
     *, tenant_type: str, request_id: str, items: list[dict[str, Any]], candidates: list[dict[str, Any]],
     resolved: list[dict[str, Any]], extracted: list[dict[str, Any]], documents_report: list[dict[str, Any]],
@@ -137,7 +190,7 @@ async def finish_per_tenant(
         units.append(Unit(key=key, document_type=document["document_type"], data=document["data"]))
     for candidate in candidates:
         index = index_by_name[candidate["document_name"]]
-        if index not in covered:  # read, but failed front/back pairing
+        if index not in covered and not candidate.get("_unmatched_page"):  # read, but failed front/back pairing
             units.append(Unit(key=(index,), document_type=candidate["document_type"], data=candidate["data"]))
     units.sort(key=lambda unit: unit.key[0])
 
@@ -159,6 +212,8 @@ async def finish_per_tenant(
         for key in tenant.keys:
             for index in key:
                 tenant_ids_by_index.setdefault(index, []).append(tenant_id)
+
+    _set_aside_expired_copies(grouping.tenants, units, items, documents_report)
 
     # A supporting document that belongs to no tenant is reported on itself. It joins no tenant, so
     # it never fails one: the tenants' own documents are still checked and extracted, it gets no
@@ -278,7 +333,7 @@ async def finish_per_tenant(
         documents = own_documents(tenant)
         data = merge_extracted_data(documents, fields)
         if company:
-            apply_signatory_role_from_license(data, documents)
+            apply_signatory_role_from_license(data, documents, ignore_spacing=True)
         normalize_form_data(data)
         tenants.append({"tenant_id": tenant_id, "status": "success", "form_data": data})
 
@@ -288,7 +343,9 @@ async def finish_per_tenant(
         (*merged_indices(document, index_by_name), document["document_type"])
         for document in resolved if document.get("is_merged_pair")
     ]
-    status = "success" if tenants and not any(report["error"] for report in documents_report) else "failed"
+    status = "success" if tenants and not any(
+        report["error"] and not report.get("ignored") for report in documents_report
+    ) else "failed"
     logger.info(
         "Tenant results request_id=%s status=%s tenants=%s",
         request_id, status, {tenant["tenant_id"]: tenant["status"] for tenant in tenants},

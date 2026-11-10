@@ -275,7 +275,8 @@ async def process_detected(
             tenant_ids=sorted({tenant_id for name in names for tenant_id in by_name.get(name, [])},
                               key=lambda tenant_id: int(tenant_id.rsplit("_", 1)[1])),
             document_type=report["document_type"],
-            status="invalid" if report["error"] else "valid",
+            # An expired copy set aside for a valid one (tenant_results) is reported, not failed.
+            status="ignored" if report.get("ignored") else "invalid" if report["error"] else "valid",
             merged=report["merged"],
             sources=[
                 _source_row(origin[name][0], origin[name][1].pages, source["ocr_file"])

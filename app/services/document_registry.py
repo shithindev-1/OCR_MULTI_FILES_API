@@ -39,7 +39,11 @@ INDIVIDUAL_FIELD_RULES: dict[str, str] = {
         "number."
     ),
     "National_Id_Expiry": "National_Id_Expiry is the national identity card's own expiry date.",
-    "Passport_Number": "Passport_Number is the passport's own number (on a visa: the passport number it prints).",
+    "Passport_Number": (
+        "Passport_Number is the passport's own number (on a visa: the passport number it prints). On a passport's "
+        "back or address page it is the current passport number printed by the barcode - never the old passport "
+        "number listed there."
+    ),
     "Passport_Issuing_Location": (
         "Passport_Issuing_Location is read only from a passport: the PLACE where it was issued - a city, emirate or "
         "country name printed with a label such as Place of Issue or Issuing Authority. Copy it exactly as printed; "
